@@ -30,6 +30,9 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatAction
 
+from collections import defaultdict
+from datetime import date
+
 from config import TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, PDF_DIR
 from analyzer import analyze_match, format_summary
 from pdf_generator import generate_pdf
@@ -44,6 +47,59 @@ logger = logging.getLogger(__name__)
 # Track active analyses to prevent spam
 _active_users = set()
 
+# ═══════════════════════════════════════════════════════════
+# RATE LIMITING
+# ═══════════════════════════════════════════════════════════
+
+# Owner ID — unlimited access (set via OWNER_ID env var or hardcode)
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+
+# Free limit per user per day
+DAILY_FREE_LIMIT = int(os.getenv("DAILY_FREE_LIMIT", "3"))
+
+# VIP users (unlimited) — add user IDs here or via /vip command (owner only)
+_vip_users: set = set()
+
+# Usage tracking: {user_id: {"date": "2026-06-03", "count": 5}}
+_usage: dict = defaultdict(lambda: {"date": "", "count": 0})
+
+
+def _check_limit(user_id: int) -> tuple[bool, int]:
+    """Check if user can make a request. Returns (allowed, remaining)."""
+    # Owner — always unlimited
+    if user_id == OWNER_ID:
+        return True, 999
+
+    # VIP — unlimited
+    if user_id in _vip_users:
+        return True, 999
+
+    today = date.today().isoformat()
+    usage = _usage[user_id]
+
+    # Reset daily counter
+    if usage["date"] != today:
+        usage["date"] = today
+        usage["count"] = 0
+
+    remaining = DAILY_FREE_LIMIT - usage["count"]
+    if remaining <= 0:
+        return False, 0
+
+    return True, remaining
+
+
+def _use_request(user_id: int):
+    """Record a request usage."""
+    if user_id == OWNER_ID or user_id in _vip_users:
+        return
+    today = date.today().isoformat()
+    usage = _usage[user_id]
+    if usage["date"] != today:
+        usage["date"] = today
+        usage["count"] = 0
+    usage["count"] += 1
+
 
 # ═══════════════════════════════════════════════════════════
 # COMMAND HANDLERS
@@ -51,6 +107,9 @@ _active_users = set()
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
+    user_id = update.effective_user.id
+    is_owner = user_id == OWNER_ID
+    limit_text = "♾ Безлимитный доступ" if is_owner or user_id in _vip_users else f"📊 {DAILY_FREE_LIMIT} анализов в день бесплатно"
     text = (
         "🎾 <b>Tennis Analyst Bot</b>\n\n"
         "Я анализирую теннисные матчи ATP и WTA с расчётом вероятностей, "
@@ -60,12 +119,14 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• /analyze Fonseca vs Mensik, Roland Garros\n"
         "• /quick Andreeva vs Cirstea\n\n"
         "Или просто напиши имена игроков:\n"
-        "• <i>Фонсека Менсик</i>\n"
-        "• <i>Zverev vs Jodar Roland Garros quarterfinal</i>\n\n"
-        "📄 /analyze — полный анализ + PDF\n"
+        "• <i>Фонсека Менсик</i>\n\n"
+        "📄 /analyze — полный анализ + PDF (3 стр.)\n"
         "⚡ /quick — быстрый текстовый анализ\n"
+        "📅 /today — матчи сегодня\n"
+        "📊 /mystats — мой лимит запросов\n"
         "❓ /help — все команды\n\n"
-        "<i>Powered by Claude AI + математическая модель Bo3/Bo5</i>"
+        f"{limit_text}\n\n"
+        "<i>Методология v3 | Claude AI + Bo3/Bo5 модель</i>"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -107,11 +168,22 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Rate limit check
+    allowed, remaining = _check_limit(user_id)
+    if not allowed:
+        await update.message.reply_text(
+            f"⛔ Дневной лимит исчерпан ({DAILY_FREE_LIMIT} анализов в день).\n"
+            "Попробуй завтра или обратись к администратору за VIP-доступом.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
     if user_id in _active_users:
         await update.message.reply_text("⏳ Предыдущий анализ ещё выполняется. Подожди.")
         return
 
     _active_users.add(user_id)
+    _use_request(user_id)
     try:
         await update.message.reply_chat_action(ChatAction.TYPING)
         wait_msg = await update.message.reply_text(
@@ -183,11 +255,21 @@ async def cmd_quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Rate limit check
+    allowed, remaining = _check_limit(user_id)
+    if not allowed:
+        await update.message.reply_text(
+            f"⛔ Дневной лимит исчерпан ({DAILY_FREE_LIMIT} анализов в день).\n"
+            "Попробуй завтра!",
+        )
+        return
+
     if user_id in _active_users:
         await update.message.reply_text("⏳ Подожди, предыдущий запрос выполняется.")
         return
 
     _active_users.add(user_id)
+    _use_request(user_id)
     try:
         await update.message.reply_chat_action(ChatAction.TYPING)
         wait_msg = await update.message.reply_text(f"⚡ Быстрый анализ: <b>{query}</b>...", parse_mode=ParseMode.HTML)
@@ -263,6 +345,71 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
+async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's daily usage stats."""
+    user_id = update.effective_user.id
+    is_owner = user_id == OWNER_ID
+    is_vip = user_id in _vip_users
+
+    today = date.today().isoformat()
+    usage = _usage[user_id]
+    used = usage["count"] if usage["date"] == today else 0
+
+    if is_owner:
+        status = "👑 Владелец (безлимит)"
+        remaining = "♾"
+    elif is_vip:
+        status = "⭐ VIP (безлимит)"
+        remaining = "♾"
+    else:
+        status = "👤 Бесплатный"
+        remaining = str(max(0, DAILY_FREE_LIMIT - used))
+
+    await update.message.reply_text(
+        f"📊 <b>Мой профиль</b>\n\n"
+        f"Статус: {status}\n"
+        f"Использовано сегодня: {used}\n"
+        f"Осталось: {remaining}\n"
+        f"Лимит в день: {DAILY_FREE_LIMIT if not (is_owner or is_vip) else '♾'}\n\n"
+        f"ID: <code>{user_id}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: grant/revoke VIP to a user. Usage: /vip 123456789"""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ Только владелец может управлять VIP.")
+        return
+
+    args = context.args
+    if not args:
+        vip_list = ", ".join(str(v) for v in _vip_users) if _vip_users else "нет"
+        await update.message.reply_text(
+            f"⭐ <b>VIP пользователи:</b>\n{vip_list}\n\n"
+            "Добавить: <code>/vip 123456789</code>\n"
+            "Удалить: <code>/vip remove 123456789</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    if args[0] == "remove" and len(args) > 1:
+        try:
+            target = int(args[1])
+            _vip_users.discard(target)
+            await update.message.reply_text(f"✅ Пользователь {target} удалён из VIP.")
+        except ValueError:
+            await update.message.reply_text("❌ Неверный ID.")
+    else:
+        try:
+            target = int(args[0])
+            _vip_users.add(target)
+            await update.message.reply_text(f"✅ Пользователь {target} добавлен в VIP! ♾")
+        except ValueError:
+            await update.message.reply_text("❌ Неверный ID. Используй: /vip 123456789")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-text messages as match queries."""
     text = update.message.text.strip()
@@ -299,6 +446,7 @@ async def post_init(app: Application):
         BotCommand("analyze", "📊 Полный анализ матча + PDF"),
         BotCommand("quick", "⚡ Быстрый анализ (текст)"),
         BotCommand("today", "📅 Матчи сегодня"),
+        BotCommand("mystats", "📊 Мой лимит запросов"),
         BotCommand("help", "❓ Помощь"),
     ]
     await app.bot.set_my_commands(commands)
@@ -333,6 +481,8 @@ def main():
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("quick", cmd_quick))
     app.add_handler(CommandHandler("today", cmd_today))
+    app.add_handler(CommandHandler("mystats", cmd_mystats))
+    app.add_handler(CommandHandler("vip", cmd_vip))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("✅ Bot is running! Press Ctrl+C to stop.")
