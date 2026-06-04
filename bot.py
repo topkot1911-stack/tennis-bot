@@ -63,6 +63,20 @@ _vip_users: set = set()
 # Usage tracking: {user_id: {"date": "2026-06-03", "count": 5}}
 _usage: dict = defaultdict(lambda: {"date": "", "count": 0})
 
+# ═══════════════════════════════════════════════════════════
+# PREDICTIONS HISTORY (for /results verification)
+# ═══════════════════════════════════════════════════════════
+
+# {date_str: [{"p1": "Зверев", "p2": "Ходар", "prob": 0.78, "fav": "Зверев", "tournament": "RG2026"}, ...]}
+_predictions: dict = defaultdict(list)
+
+# ═══════════════════════════════════════════════════════════
+# FAVORITE PLAYERS (/follow)
+# ═══════════════════════════════════════════════════════════
+
+# {user_id: {"Zverev", "Fonseca", "Andreeva"}}
+_followed: dict = defaultdict(set)
+
 
 def _check_limit(user_id: int) -> tuple[bool, int]:
     """Check if user can make a request. Returns (allowed, remaining)."""
@@ -135,15 +149,16 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     text = (
         "🎾 <b>Команды:</b>\n\n"
-        "📊 /analyze [матч] — Полный анализ:\n"
-        "   • Профили игроков\n"
-        "   • Факторная корректировка\n"
-        "   • Вероятности (победитель, сеты, тоталы)\n"
-        "   • Стилистический разбор\n"
-        "   • Сценарии матча\n"
-        "   • PDF-отчёт\n\n"
-        "⚡ /quick [матч] — Быстрый анализ:\n"
-        "   • Текстовая сводка без PDF\n\n"
+        "<b>Анализ:</b>\n"
+        "📊 /analyze [матч] — PDF-отчёт (3 стр.)\n"
+        "⚡ /quick [матч] — текстовый анализ\n"
+        "📅 /today — все матчи сегодня\n\n"
+        "<b>Отслеживание:</b>\n"
+        "⭐ /follow [игрок] — добавить в избранные\n"
+        "❌ /unfollow [игрок] — убрать из избранных\n"
+        "📋 /results — проверка вчерашних прогнозов\n\n"
+        "<b>Аккаунт:</b>\n"
+        "📊 /mystats — мой лимит запросов\n\n"
         "📝 <b>Формат запроса:</b>\n"
         "Указывай двух игроков и (опционально) турнир:\n"
         "   • <code>/analyze Зверев vs Ходар, RG2026 QF</code>\n"
@@ -195,6 +210,23 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Run analysis
         data = await analyze_match(query)
+
+        # Save prediction for /results verification
+        try:
+            p1 = data.get("player1", {})
+            p2 = data.get("player2", {})
+            fav_idx = data.get("favorite", 1)
+            fav = p1 if fav_idx == 1 else p2
+            _predictions[date.today().isoformat()].append({
+                "p1": p1.get("name", "?"),
+                "p2": p2.get("name", "?"),
+                "prob": data.get("probability", 0.5),
+                "fav": fav.get("name", "?"),
+                "tournament": data.get("tournament", "?"),
+                "confidence": data.get("confidence", "?"),
+            })
+        except Exception:
+            pass
 
         # Generate summary text
         summary = format_summary(data)
@@ -410,6 +442,115 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный ID. Используй: /vip 123456789")
 
 
+async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check yesterday's predictions against actual results via web search."""
+    from datetime import timedelta
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    preds = _predictions.get(yesterday, [])
+
+    if not preds:
+        await update.message.reply_text(
+            "📋 Нет прогнозов за вчера для проверки.\n"
+            "Сделай /analyze на предстоящий матч — завтра сможешь проверить!",
+        )
+        return
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    wait_msg = await update.message.reply_text("🔍 Проверяю вчерашние прогнозы...")
+
+    try:
+        matches_text = "\n".join(
+            f"- {p['p1']} vs {p['p2']}: прогноз {p['fav']} {round(p['prob']*100)}%"
+            for p in preds
+        )
+
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=2000,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
+            messages=[{"role": "user", "content":
+                f"Найди результаты вчерашних теннисных матчей ({yesterday}) и сравни с прогнозами:\n"
+                f"{matches_text}\n\n"
+                "Для каждого матча напиши: счёт, кто выиграл, прогноз верный или нет.\n"
+                "В конце: общая статистика X из Y верных. Ответ на русском, кратко."
+            }],
+        )
+
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                text += block.text
+
+        await wait_msg.delete()
+        if len(text) > 4000:
+            text = text[:3997] + "..."
+        await update.message.reply_text(
+            f"📋 <b>Проверка прогнозов за {yesterday}</b>\n\n{text}",
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logger.error(f"Results error: {e}")
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
+
+
+async def cmd_follow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Follow a player. Usage: /follow Zverev"""
+    user_id = update.effective_user.id
+    args = context.args
+
+    if not args:
+        followed = _followed.get(user_id, set())
+        if followed:
+            players = ", ".join(sorted(followed))
+            await update.message.reply_text(
+                f"⭐ <b>Твои избранные игроки:</b>\n{players}\n\n"
+                "Добавить: <code>/follow Zverev</code>\n"
+                "Удалить: <code>/unfollow Zverev</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(
+                "У тебя пока нет избранных игроков.\n"
+                "Добавь: <code>/follow Zverev</code>",
+                parse_mode=ParseMode.HTML,
+            )
+        return
+
+    player = " ".join(args)
+    _followed[user_id].add(player)
+    await update.message.reply_text(
+        f"⭐ <b>{player}</b> добавлен в избранные!\n\n"
+        f"Всего избранных: {len(_followed[user_id])}\n"
+        "Используй /today — матчи избранных будут отмечены.",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def cmd_unfollow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Unfollow a player. Usage: /unfollow Zverev"""
+    user_id = update.effective_user.id
+    args = context.args
+
+    if not args:
+        await update.message.reply_text("Используй: <code>/unfollow Zverev</code>", parse_mode=ParseMode.HTML)
+        return
+
+    player = " ".join(args)
+    if player in _followed.get(user_id, set()):
+        _followed[user_id].discard(player)
+        await update.message.reply_text(f"✅ {player} удалён из избранных.")
+    else:
+        await update.message.reply_text(f"❌ {player} не найден в избранных.")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle free-text messages as match queries."""
     text = update.message.text.strip()
@@ -443,10 +584,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     """Set bot commands in Telegram menu."""
     commands = [
-        BotCommand("analyze", "📊 Полный анализ матча + PDF"),
-        BotCommand("quick", "⚡ Быстрый анализ (текст)"),
+        BotCommand("analyze", "📊 Полный анализ + PDF"),
+        BotCommand("quick", "⚡ Быстрый анализ"),
         BotCommand("today", "📅 Матчи сегодня"),
-        BotCommand("mystats", "📊 Мой лимит запросов"),
+        BotCommand("results", "📋 Проверка прогнозов"),
+        BotCommand("follow", "⭐ Избранные игроки"),
+        BotCommand("mystats", "📊 Мой лимит"),
         BotCommand("help", "❓ Помощь"),
     ]
     await app.bot.set_my_commands(commands)
@@ -483,6 +626,9 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
+    app.add_handler(CommandHandler("results", cmd_results))
+    app.add_handler(CommandHandler("follow", cmd_follow))
+    app.add_handler(CommandHandler("unfollow", cmd_unfollow))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     print("✅ Bot is running! Press Ctrl+C to stop.")
