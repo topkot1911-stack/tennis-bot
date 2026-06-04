@@ -324,22 +324,46 @@ def generate_pdf(data: dict) -> str:
             c.drawString(TLM, y, line)
         y -= 2 * mm
 
+    # Conditions
+    conditions = data.get("conditions", "")
+    if conditions:
+        y = _sbar(c, "УСЛОВИЯ И ФИЗИЧЕСКИЙ ФАКТОР", y, gap=2 * mm)
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        for line in _wrap(c, conditions, DJS, 6, mw):
+            y -= 2.8 * mm
+            c.drawString(TLM, y, line)
+
+    _footer(c)
+    c.showPage()
+
+    # ═══════════ PAGE 3 — Scenarios + Verdict ═══════════
+    y = H - 15 * mm
+    h = 10 * mm
+    c.setFillColor(NAVY)
+    c.rect(LM, y - h, CW, h, fill=1, stroke=0)
+    c.setFillColor(WHITE)
+    c.setFont(DJSB, 10)
+    c.drawString(TLM, y - h + 3 * mm,
+                 f"ФИНАЛЬНЫЙ АНАЛИЗ | {fav.get('name_en', '')} vs {dog.get('name_en', '')}")
+    y -= h + 3 * mm
+
     # Scenarios
     scenarios = data.get("scenarios", [])
     if scenarios:
-        y = _sbar(c, "СЦЕНАРИИ МАТЧА", y, gap=2 * mm)
+        y = _sbar(c, "КЛЮЧЕВЫЕ СЦЕНАРИИ МАТЧА", y, gap=1 * mm)
         for sc in scenarios[:4]:
-            c.setFont(DJSB, 5.5)
+            c.setFont(DJSB, 6)
             c.setFillColor(BLUE)
-            y -= 3 * mm
-            c.drawString(TLM, y, str(sc.get("title", ""))[:90])
-            c.setFont(DJS, 5)
+            y -= 3.5 * mm
+            c.drawString(TLM, y, str(sc.get("title", ""))[:95])
+            c.setFont(DJS, 5.5)
             c.setFillColor(BLACK)
-            for wl in _wrap(c, str(sc.get("text", "")), DJS, 5, mw):
-                y -= 2.2 * mm
+            for wl in _wrap(c, str(sc.get("text", "")), DJS, 5.5, mw):
+                y -= 2.5 * mm
                 c.drawString(TLM, y, wl)
-            y -= 1 * mm
-        y -= 1 * mm
+            y -= 2 * mm
+        y -= 2 * mm
 
     # Final verdict
     verdict = data.get("verdict", "")
@@ -348,9 +372,9 @@ def generate_pdf(data: dict) -> str:
         c.setFillColor(GREEN)
         c.rect(LM, y - vh, CW, vh, fill=1, stroke=0)
         c.setFillColor(WHITE)
-        c.setFont(DJSB, 7.5)
+        c.setFont(DJSB, 8)
         c.drawString(TLM, y - vh + 1.8 * mm,
-                     f"ВЕРДИКТ: {fav['name']} {round(p * 100)}% | "
+                     f"ФИНАЛЬНЫЙ ВЕРДИКТ: {fav['name']} {round(p * 100)}% | "
                      f"E(total)={et} | Фора: -{hc}")
         y -= vh + 2 * mm
 
@@ -359,6 +383,18 @@ def generate_pdf(data: dict) -> str:
         for line in _wrap(c, verdict, DJS, 6, mw):
             y -= 3 * mm
             c.drawString(TLM, y, line)
+        y -= 4 * mm
+
+    # Confidence badge
+    confidence = data.get("confidence", "")
+    if confidence:
+        ci_h = 4.5 * mm
+        c.setFillColor(GOLD)
+        c.rect(LM, y - ci_h, CW, ci_h, fill=1, stroke=0)
+        c.setFillColor(NAVY)
+        c.setFont(DJSB, 6.5)
+        c.drawString(TLM, y - ci_h + 1 * mm,
+                     f"УВЕРЕННОСТЬ: {confidence} | Методология v3")
 
     _footer(c)
     c.showPage()

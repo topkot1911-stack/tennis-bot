@@ -210,15 +210,57 @@ async def cmd_quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /today — placeholder for future schedule feature."""
-    await update.message.reply_text(
-        "📅 <b>Расписание дня</b>\n\n"
-        "Эта функция в разработке. Пока используй:\n"
-        "• /analyze [матч] — для анализа конкретного матча\n\n"
-        "В будущих версиях бот будет автоматически показывать "
-        "все матчи дня с анализом.",
-        parse_mode=ParseMode.HTML,
-    )
+    """Handle /today — fetch today's tennis schedule via web search."""
+    from datetime import date
+    import anthropic
+    from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+    await update.message.reply_chat_action(ChatAction.TYPING)
+    wait_msg = await update.message.reply_text("📅 Ищу расписание матчей на сегодня...")
+
+    try:
+        today = date.today().strftime("%d %B %Y")
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        response = client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4000,
+            tools=[{
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 3,
+            }],
+            messages=[{"role": "user", "content":
+                f"Сегодня {today}. Найди через веб-поиск ВСЕ мужские и женские теннисные матчи, "
+                "которые играются СЕГОДНЯ на крупных турнирах (Grand Slam, Masters, ATP/WTA). "
+                "Для каждого матча укажи: игроки, турнир, раунд, корт, время. "
+                "Ответ на русском языке, в виде структурированного текста (НЕ JSON). "
+                "Если турнир один — перечисли все матчи по кортам. "
+                "В конце добавь: 'Для анализа любого матча: /analyze Игрок1 vs Игрок2'."
+            }],
+        )
+
+        text = ""
+        for block in response.content:
+            if hasattr(block, "text") and block.text:
+                text += block.text
+
+        if not text.strip():
+            text = "Не удалось найти расписание. Попробуйте позже."
+
+        await wait_msg.delete()
+        # Split long messages (Telegram limit 4096 chars)
+        if len(text) > 4000:
+            text = text[:3997] + "..."
+        await update.message.reply_text(f"📅 <b>Матчи сегодня ({today})</b>\n\n{text}",
+                                         parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Today error: {e}")
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
