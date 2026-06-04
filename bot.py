@@ -424,16 +424,17 @@ async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Send invoice via Telegram Stars
     await update.message.reply_invoice(
-        title="⭐ Tennis Analyst VIP",
+        title="Tennis Analyst VIP",
         description=(
             "Безлимитные анализы матчей на 30 дней:\n"
-            "• Безлимитные /analyze + PDF (3 стр.)\n"
-            "• Проверка прогнозов (/results)\n"
-            "• Избранные игроки (/follow)\n"
-            "• Приоритетная поддержка"
+            "- Безлимитные /analyze + PDF (3 стр.)\n"
+            "- Проверка прогнозов (/results)\n"
+            "- Избранные игроки (/follow)\n"
+            "- Приоритетная поддержка"
         ),
         payload=f"vip_monthly_{user_id}",
-        currency="XTR",  # Telegram Stars
+        provider_token="",  # Empty for Telegram Stars
+        currency="XTR",
         prices=[LabeledPrice("VIP подписка (30 дней)", VIP_PRICE_STARS)],
     )
 
