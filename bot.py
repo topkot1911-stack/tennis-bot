@@ -20,11 +20,12 @@ import logging
 import os
 import traceback
 
-from telegram import Update, BotCommand
+from telegram import Update, BotCommand, LabeledPrice
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    PreCheckoutQueryHandler,
     ContextTypes,
     filters,
 )
@@ -187,8 +188,8 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allowed, remaining = _check_limit(user_id)
     if not allowed:
         await update.message.reply_text(
-            f"⛔ Дневной лимит исчерпан ({DAILY_FREE_LIMIT} анализов в день).\n"
-            "Попробуй завтра или обратись к администратору за VIP-доступом.",
+            f"⛔ Дневной лимит исчерпан ({DAILY_FREE_LIMIT} анализа в день).\n\n"
+            f"⭐ Безлимит — /subscribe ({VIP_PRICE_STARS} Stars/мес)",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -408,6 +409,77 @@ async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# Price in Telegram Stars (1 Star ≈ 1.5-2 rub)
+VIP_PRICE_STARS = int(os.getenv("VIP_PRICE_STARS", "250"))
+
+
+async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show VIP plan and send Stars payment invoice."""
+    user_id = update.effective_user.id
+    is_vip = user_id == OWNER_ID or user_id in _vip_users
+
+    if is_vip:
+        await update.message.reply_text("⭐ У тебя уже есть VIP-доступ! Безлимитные анализы.")
+        return
+
+    # Send invoice via Telegram Stars
+    await update.message.reply_invoice(
+        title="⭐ Tennis Analyst VIP",
+        description=(
+            "Безлимитные анализы матчей на 30 дней:\n"
+            "• Безлимитные /analyze + PDF (3 стр.)\n"
+            "• Проверка прогнозов (/results)\n"
+            "• Избранные игроки (/follow)\n"
+            "• Приоритетная поддержка"
+        ),
+        payload=f"vip_monthly_{user_id}",
+        currency="XTR",  # Telegram Stars
+        prices=[LabeledPrice("VIP подписка (30 дней)", VIP_PRICE_STARS)],
+    )
+
+
+async def pre_checkout_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Approve the payment before it's processed."""
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+
+async def successful_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle successful Stars payment — activate VIP."""
+    user_id = update.effective_user.id
+    payment = update.message.successful_payment
+
+    logger.info(f"Payment received: user={user_id}, amount={payment.total_amount} Stars")
+
+    # Activate VIP
+    _vip_users.add(user_id)
+
+    await update.message.reply_text(
+        "🎉 <b>VIP активирован!</b>\n\n"
+        f"⭐ Оплачено: {payment.total_amount} Stars\n"
+        "📅 Доступ: 30 дней\n\n"
+        "Теперь тебе доступно:\n"
+        "• Безлимитные /analyze + 3-стр. PDF\n"
+        "• /results — проверка прогнозов\n"
+        "• /follow — избранные игроки\n\n"
+        "Проверь статус: /mystats",
+        parse_mode=ParseMode.HTML,
+    )
+
+    # Notify owner
+    if OWNER_ID:
+        try:
+            name = update.effective_user.first_name or "Unknown"
+            await context.bot.send_message(
+                OWNER_ID,
+                f"💰 Новая VIP-оплата!\n"
+                f"User: {name} (ID: {user_id})\n"
+                f"Сумма: {payment.total_amount} Stars",
+            )
+        except Exception:
+            pass
+
+
 async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner-only: grant/revoke VIP to a user. Usage: /vip 123456789"""
     user_id = update.effective_user.id
@@ -447,6 +519,14 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from datetime import timedelta
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID and user_id not in _vip_users:
+        await update.message.reply_text(
+            "⭐ Проверка прогнозов — функция VIP.\n"
+            "Подключи VIP: /subscribe",
+        )
+        return
 
     yesterday = (date.today() - timedelta(days=1)).isoformat()
     preds = _predictions.get(yesterday, [])
@@ -589,6 +669,7 @@ async def post_init(app: Application):
         BotCommand("today", "📅 Матчи сегодня"),
         BotCommand("results", "📋 Проверка прогнозов"),
         BotCommand("follow", "⭐ Избранные игроки"),
+        BotCommand("subscribe", "⭐ VIP подписка"),
         BotCommand("mystats", "📊 Мой лимит"),
         BotCommand("help", "❓ Помощь"),
     ]
@@ -626,6 +707,9 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
+    app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("results", cmd_results))
     app.add_handler(CommandHandler("follow", cmd_follow))
     app.add_handler(CommandHandler("unfollow", cmd_unfollow))
