@@ -140,5 +140,35 @@ def increment_usage(user_id):
     conn.close()
 
 
+# ── Export & Stats ──
+
+def get_all_predictions():
+    conn = _conn()
+    rows = conn.execute("SELECT * FROM predictions ORDER BY date DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_prediction_stats():
+    conn = _conn()
+    total = conn.execute("SELECT COUNT(*) as c FROM predictions").fetchone()["c"]
+    by_date = conn.execute(
+        "SELECT date, COUNT(*) as c FROM predictions GROUP BY date ORDER BY date DESC LIMIT 14"
+    ).fetchall()
+    conn.close()
+    return {"total": total, "by_date": [dict(r) for r in by_date]}
+
+
+def export_csv():
+    """Export all predictions as CSV string."""
+    rows = get_all_predictions()
+    if not rows:
+        return ""
+    lines = ["date,p1,p2,probability,favorite,tournament,confidence"]
+    for r in rows:
+        lines.append(f"{r['date']},{r['p1']},{r['p2']},{r['prob']},{r['fav']},{r['tournament']},{r['confidence']}")
+    return "\n".join(lines)
+
+
 # Initialize on import
 init_db()

@@ -471,6 +471,48 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный ID. Используй: /vip 123456789")
 
 
+async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: export all predictions as CSV file."""
+    if update.effective_user.id != OWNER_ID:
+        await update.message.reply_text("⛔ Только владелец может экспортировать данные.")
+        return
+
+    csv_data = db.export_csv()
+    if not csv_data:
+        await update.message.reply_text("📋 Нет сохранённых прогнозов.")
+        return
+
+    # Send as file
+    import io
+    f = io.BytesIO(csv_data.encode("utf-8"))
+    f.name = "predictions_export.csv"
+    stats = db.get_prediction_stats()
+    await update.message.reply_document(
+        document=f,
+        filename="predictions_export.csv",
+        caption=f"📊 Экспорт: {stats['total']} прогнозов\n"
+                f"Скинь этот файл в Cowork для анализа точности и улучшения модели.",
+    )
+
+
+async def cmd_accuracy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show prediction accuracy statistics."""
+    stats = db.get_prediction_stats()
+
+    if stats["total"] == 0:
+        await update.message.reply_text("📊 Пока нет прогнозов для статистики.")
+        return
+
+    lines = [f"📊 <b>Статистика прогнозов</b>\n", f"Всего прогнозов: {stats['total']}\n"]
+    lines.append("<b>По дням:</b>")
+    for day in stats["by_date"][:10]:
+        lines.append(f"  {day['date']}: {day['c']} анализов")
+    lines.append(f"\nДля проверки точности: /results")
+    lines.append(f"Для экспорта: /export (владелец)")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check yesterday's predictions against actual results via web search."""
     from datetime import timedelta
@@ -628,6 +670,7 @@ async def post_init(app: Application):
         BotCommand("results", "📋 Проверка прогнозов"),
         BotCommand("follow", "⭐ Избранные игроки"),
         BotCommand("subscribe", "⭐ VIP подписка"),
+        BotCommand("accuracy", "📊 Статистика прогнозов"),
         BotCommand("mystats", "📊 Мой лимит"),
         BotCommand("help", "❓ Помощь"),
     ]
@@ -666,6 +709,8 @@ def main():
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
+    app.add_handler(CommandHandler("export", cmd_export))
+    app.add_handler(CommandHandler("accuracy", cmd_accuracy))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("results", cmd_results))
