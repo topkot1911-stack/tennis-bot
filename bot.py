@@ -31,12 +31,12 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode, ChatAction
 
-from collections import defaultdict
 from datetime import date
 
 from config import TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, PDF_DIR
 from analyzer import analyze_match, format_summary
 from pdf_generator import generate_pdf
+import database as db
 
 # Logging
 logging.basicConfig(
@@ -58,62 +58,23 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 # Free limit per user per day
 DAILY_FREE_LIMIT = int(os.getenv("DAILY_FREE_LIMIT", "3"))
 
-# VIP users (unlimited) — add user IDs here or via /vip command (owner only)
-_vip_users: set = set()
-
-# Usage tracking: {user_id: {"date": "2026-06-03", "count": 5}}
-_usage: dict = defaultdict(lambda: {"date": "", "count": 0})
-
-# ═══════════════════════════════════════════════════════════
-# PREDICTIONS HISTORY (for /results verification)
-# ═══════════════════════════════════════════════════════════
-
-# {date_str: [{"p1": "Зверев", "p2": "Ходар", "prob": 0.78, "fav": "Зверев", "tournament": "RG2026"}, ...]}
-_predictions: dict = defaultdict(list)
-
-# ═══════════════════════════════════════════════════════════
-# FAVORITE PLAYERS (/follow)
-# ═══════════════════════════════════════════════════════════
-
-# {user_id: {"Zverev", "Fonseca", "Andreeva"}}
-_followed: dict = defaultdict(set)
+# All persistent data (VIP, predictions, follows, usage) stored in SQLite via database.py
 
 
 def _check_limit(user_id: int) -> tuple[bool, int]:
     """Check if user can make a request. Returns (allowed, remaining)."""
-    # Owner — always unlimited
-    if user_id == OWNER_ID:
+    if user_id == OWNER_ID or db.is_vip(user_id):
         return True, 999
-
-    # VIP — unlimited
-    if user_id in _vip_users:
-        return True, 999
-
-    today = date.today().isoformat()
-    usage = _usage[user_id]
-
-    # Reset daily counter
-    if usage["date"] != today:
-        usage["date"] = today
-        usage["count"] = 0
-
-    remaining = DAILY_FREE_LIMIT - usage["count"]
-    if remaining <= 0:
-        return False, 0
-
-    return True, remaining
+    used = db.get_usage(user_id)
+    remaining = DAILY_FREE_LIMIT - used
+    return (True, remaining) if remaining > 0 else (False, 0)
 
 
 def _use_request(user_id: int):
     """Record a request usage."""
-    if user_id == OWNER_ID or user_id in _vip_users:
+    if user_id == OWNER_ID or db.is_vip(user_id):
         return
-    today = date.today().isoformat()
-    usage = _usage[user_id]
-    if usage["date"] != today:
-        usage["date"] = today
-        usage["count"] = 0
-    usage["count"] += 1
+    db.increment_usage(user_id)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -124,7 +85,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     user_id = update.effective_user.id
     is_owner = user_id == OWNER_ID
-    limit_text = "♾ Безлимитный доступ" if is_owner or user_id in _vip_users else f"📊 {DAILY_FREE_LIMIT} анализов в день бесплатно"
+    limit_text = "♾ Безлимитный доступ" if is_owner or db.is_vip(user_id) else f"📊 {DAILY_FREE_LIMIT} анализов в день бесплатно"
     text = (
         "🎾 <b>Tennis Analyst Bot</b>\n\n"
         "Я анализирую теннисные матчи ATP и WTA с расчётом вероятностей, "
@@ -212,20 +173,18 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Run analysis
         data = await analyze_match(query)
 
-        # Save prediction for /results verification
+        # Save prediction to database for /results verification
         try:
-            p1 = data.get("player1", {})
-            p2 = data.get("player2", {})
+            p1d = data.get("player1", {})
+            p2d = data.get("player2", {})
             fav_idx = data.get("favorite", 1)
-            fav = p1 if fav_idx == 1 else p2
-            _predictions[date.today().isoformat()].append({
-                "p1": p1.get("name", "?"),
-                "p2": p2.get("name", "?"),
-                "prob": data.get("probability", 0.5),
-                "fav": fav.get("name", "?"),
-                "tournament": data.get("tournament", "?"),
-                "confidence": data.get("confidence", "?"),
-            })
+            favd = p1d if fav_idx == 1 else p2d
+            db.save_prediction(
+                p1=p1d.get("name", "?"), p2=p2d.get("name", "?"),
+                prob=data.get("probability", 0.5), fav=favd.get("name", "?"),
+                tournament=data.get("tournament", "?"),
+                confidence=data.get("confidence", "?"),
+            )
         except Exception:
             pass
 
@@ -382,11 +341,9 @@ async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show user's daily usage stats."""
     user_id = update.effective_user.id
     is_owner = user_id == OWNER_ID
-    is_vip = user_id in _vip_users
+    is_vip = db.is_vip(user_id)
 
-    today = date.today().isoformat()
-    usage = _usage[user_id]
-    used = usage["count"] if usage["date"] == today else 0
+    used = db.get_usage(user_id)
 
     if is_owner:
         status = "👑 Владелец (безлимит)"
@@ -416,9 +373,7 @@ VIP_PRICE_STARS = int(os.getenv("VIP_PRICE_STARS", "250"))
 async def cmd_subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show VIP plan and send Stars payment invoice."""
     user_id = update.effective_user.id
-    is_vip = user_id == OWNER_ID or user_id in _vip_users
-
-    if is_vip:
+    if user_id == OWNER_ID or db.is_vip(user_id):
         await update.message.reply_text("⭐ У тебя уже есть VIP-доступ! Безлимитные анализы.")
         return
 
@@ -452,8 +407,8 @@ async def successful_payment_handler(update: Update, context: ContextTypes.DEFAU
 
     logger.info(f"Payment received: user={user_id}, amount={payment.total_amount} Stars")
 
-    # Activate VIP
-    _vip_users.add(user_id)
+    # Activate VIP in database
+    db.add_vip(user_id)
 
     await update.message.reply_text(
         "🎉 <b>VIP активирован!</b>\n\n"
@@ -490,7 +445,8 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     args = context.args
     if not args:
-        vip_list = ", ".join(str(v) for v in _vip_users) if _vip_users else "нет"
+        all_vips = db.get_all_vips()
+        vip_list = ", ".join(str(v) for v in all_vips) if all_vips else "нет"
         await update.message.reply_text(
             f"⭐ <b>VIP пользователи:</b>\n{vip_list}\n\n"
             "Добавить: <code>/vip 123456789</code>\n"
@@ -502,14 +458,14 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if args[0] == "remove" and len(args) > 1:
         try:
             target = int(args[1])
-            _vip_users.discard(target)
+            db.remove_vip(target)
             await update.message.reply_text(f"✅ Пользователь {target} удалён из VIP.")
         except ValueError:
             await update.message.reply_text("❌ Неверный ID.")
     else:
         try:
             target = int(args[0])
-            _vip_users.add(target)
+            db.add_vip(target)
             await update.message.reply_text(f"✅ Пользователь {target} добавлен в VIP! ♾")
         except ValueError:
             await update.message.reply_text("❌ Неверный ID. Используй: /vip 123456789")
@@ -522,7 +478,7 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     user_id = update.effective_user.id
-    if user_id != OWNER_ID and user_id not in _vip_users:
+    if user_id != OWNER_ID and not db.is_vip(user_id):
         await update.message.reply_text(
             "⭐ Проверка прогнозов — функция VIP.\n"
             "Подключи VIP: /subscribe",
@@ -530,7 +486,7 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     yesterday = (date.today() - timedelta(days=1)).isoformat()
-    preds = _predictions.get(yesterday, [])
+    preds = db.get_predictions(yesterday)
 
     if not preds:
         await update.message.reply_text(
@@ -588,7 +544,7 @@ async def cmd_follow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
 
     if not args:
-        followed = _followed.get(user_id, set())
+        followed = db.get_follows(user_id)
         if followed:
             players = ", ".join(sorted(followed))
             await update.message.reply_text(
@@ -606,10 +562,11 @@ async def cmd_follow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     player = " ".join(args)
-    _followed[user_id].add(player)
+    db.add_follow(user_id, player)
+    follows = db.get_follows(user_id)
     await update.message.reply_text(
         f"⭐ <b>{player}</b> добавлен в избранные!\n\n"
-        f"Всего избранных: {len(_followed[user_id])}\n"
+        f"Всего избранных: {len(follows)}\n"
         "Используй /today — матчи избранных будут отмечены.",
         parse_mode=ParseMode.HTML,
     )
@@ -625,8 +582,8 @@ async def cmd_unfollow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     player = " ".join(args)
-    if player in _followed.get(user_id, set()):
-        _followed[user_id].discard(player)
+    if player in db.get_follows(user_id):
+        db.remove_follow(user_id, player)
         await update.message.reply_text(f"✅ {player} удалён из избранных.")
     else:
         await update.message.reply_text(f"❌ {player} не найден в избранных.")
