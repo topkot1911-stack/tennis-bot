@@ -170,5 +170,23 @@ def export_csv():
     return "\n".join(lines)
 
 
+# ── Language ──
+
+def set_language(user_id, lang):
+    conn = _conn()
+    conn.execute("CREATE TABLE IF NOT EXISTS user_lang (user_id INTEGER PRIMARY KEY, lang TEXT)")
+    conn.execute("INSERT OR REPLACE INTO user_lang (user_id, lang) VALUES (?,?)", (user_id, lang))
+    conn.commit()
+    conn.close()
+
+
+def get_language(user_id):
+    conn = _conn()
+    conn.execute("CREATE TABLE IF NOT EXISTS user_lang (user_id INTEGER PRIMARY KEY, lang TEXT)")
+    row = conn.execute("SELECT lang FROM user_lang WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return row["lang"] if row else "ru"
+
+
 # Initialize on import
 init_db()

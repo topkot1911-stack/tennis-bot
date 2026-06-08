@@ -3,7 +3,7 @@
 import json
 import math
 import anthropic
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SYSTEM_PROMPT, CS2_SYSTEM_PROMPT
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SYSTEM_PROMPT, CS2_SYSTEM_PROMPT, DOTA2_SYSTEM_PROMPT
 
 
 # ═══════════════════════════════════════════════════════════
@@ -125,7 +125,7 @@ def bo3_distribution(p_win: float) -> dict:
 # CLAUDE API ANALYSIS
 # ═══════════════════════════════════════════════════════════
 
-async def analyze_match(query: str) -> dict:
+async def analyze_match(query: str, lang_suffix: str = "") -> dict:
     """
     Send match query to Claude API with web search enabled.
     Returns parsed JSON dict with all analysis data.
@@ -143,6 +143,7 @@ async def analyze_match(query: str) -> dict:
         "НЕ используй устаревшие данные из памяти — ТОЛЬКО свежие из поиска. "
         "Рассчитай вероятность по факторной модели. "
         "Верни результат СТРОГО в формате JSON как описано в системном промпте."
+        + lang_suffix
     )
 
     response = client.messages.create(
@@ -322,7 +323,7 @@ def format_summary(data: dict) -> str:
 # CS2 ANALYSIS
 # ═══════════════════════════════════════════════════════════
 
-async def analyze_cs2(query: str) -> dict:
+async def analyze_cs2(query: str, lang_suffix: str = "") -> dict:
     """Analyze a CS2 match using Claude API with web search."""
     from datetime import date
     today = date.today().strftime("%d %B %Y")
@@ -341,6 +342,7 @@ async def analyze_cs2(query: str) -> dict:
         "- Турнир, стадию, формат\n"
         "НЕ используй устаревшие данные из памяти — ТОЛЬКО свежие из поиска.\n"
         "Верни результат СТРОГО в формате JSON как описано в системном промпте."
+        + lang_suffix
     )
 
     response = client.messages.create(
@@ -477,4 +479,115 @@ def format_cs2_summary(data: dict) -> str:
     lines.append("")
     lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
 
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+# DOTA 2 ANALYSIS
+# ═══════════════════════════════════════════════════════════
+
+async def analyze_dota2(query: str, lang_suffix: str = "") -> dict:
+    """Analyze a Dota 2 match using Claude API with web search."""
+    from datetime import date
+    today = date.today().strftime("%d %B %Y")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    user_prompt = (
+        f"Сегодня {today}. Проанализируй ПРЕДСТОЯЩИЙ матч Dota 2: {query}\n\n"
+        "ОБЯЗАТЕЛЬНО используй веб-поиск на Liquipedia и dotabuff:\n"
+        "- Рейтинги обеих команд, составы, ростер-изменения\n"
+        "- Win% за 3 месяца, текущий патч и мета\n"
+        "- Сигнатурные герои, H2H, турнир, формат\n"
+        "НЕ используй устаревшие данные — ТОЛЬКО свежие из поиска.\n"
+        "Верни результат СТРОГО в формате JSON."
+        + lang_suffix
+    )
+    response = client.messages.create(
+        model=CLAUDE_MODEL, max_tokens=16000, system=DOTA2_SYSTEM_PROMPT,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    all_text = ""
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            all_text += "\n" + block.text
+    if not all_text.strip():
+        raise ValueError("Claude returned no text response")
+    text = all_text.strip()
+    if "```json" in text:
+        json_part = text.split("```json")[1].split("```")[0].strip()
+        try:
+            data = json.loads(json_part)
+            p = data.get("probability", 0.5)
+            fmt = data.get("format", "Bo3")
+            if fmt == "Bo5": data["distribution"] = bo5_distribution(p)
+            elif fmt in ("Bo1","Bo2"): data["distribution"] = {"p_win": p}
+            else: data["distribution"] = bo3_distribution(p)
+            return data
+        except json.JSONDecodeError:
+            pass
+    data = None; best_len = 0; i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0; start = i
+            for j in range(i, len(text)):
+                if text[j] == '{': depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:j+1]
+                        if len(candidate) > best_len:
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, dict) and ("team1" in parsed or "probability" in parsed):
+                                    data = parsed; best_len = len(candidate)
+                            except json.JSONDecodeError: pass
+                        break
+        i += 1
+    if data is None:
+        raise ValueError(f"Could not extract JSON ({len(text)} chars)")
+    p = data.get("probability", 0.5); fmt = data.get("format", "Bo3")
+    if fmt == "Bo5": data["distribution"] = bo5_distribution(p)
+    elif fmt in ("Bo1","Bo2"): data["distribution"] = {"p_win": p}
+    else: data["distribution"] = bo3_distribution(p)
+    return data
+
+
+def format_dota2_summary(data: dict) -> str:
+    """Format Dota 2 analysis for Telegram."""
+    p = data.get("probability", 0.5)
+    fav_idx = data.get("favorite", 1)
+    t1 = data.get("team1", {}); t2 = data.get("team2", {})
+    fav = t1 if fav_idx == 1 else t2
+    dog = t2 if fav_idx == 1 else t1
+    fav_pct = round(p * 100)
+    lines = []
+    lines.append(f"⚔️ <b>Dota 2 | {data.get('tournament', '')} | {data.get('stage', '')}</b>")
+    lines.append(f"📅 {data.get('date', '')} | {data.get('format', 'Bo3')}")
+    lines.append("")
+    lines.append(f"<b>{t1.get('name', '')}</b>  vs  <b>{t2.get('name', '')}</b>")
+    lines.append("")
+    bar_len = 20; fav_blocks = round(bar_len * p)
+    lines.append("🟩" * fav_blocks + "🟥" * (bar_len - fav_blocks))
+    lines.append(f"<b>{fav.get('short', fav.get('name', ''))} {fav_pct}%</b> — {dog.get('short', dog.get('name', ''))} {100 - fav_pct}%")
+    lines.append("")
+    meta = data.get("meta_analysis", {})
+    if meta:
+        lines.append("🎯 <b>Мета/драфт:</b>")
+        if meta.get("current_patch"): lines.append(f"  Патч: {meta['current_patch']}")
+        if meta.get("team1_fit"): lines.append(f"  {t1.get('short', '')}: {meta['team1_fit']}")
+        if meta.get("team2_fit"): lines.append(f"  {t2.get('short', '')}: {meta['team2_fit']}")
+        lines.append("")
+    factors = data.get("factors", [])
+    if factors:
+        lines.append("⚖️ <b>Факторы:</b>")
+        for f in factors[:6]:
+            lines.append(f"  {f.get('num','')}. {f.get('name','')}: {f.get('shift','')}")
+        lines.append("")
+    verdict = data.get("verdict", "")
+    if verdict:
+        lines.append(f"🏆 <b>Вердикт:</b>")
+        if len(verdict) > 350: verdict = verdict[:347] + "..."
+        lines.append(verdict)
+    lines.append("")
+    lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
     return "\n".join(lines)

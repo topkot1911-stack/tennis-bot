@@ -20,12 +20,13 @@ import logging
 import os
 import traceback
 
-from telegram import Update, BotCommand, LabeledPrice
+from telegram import Update, BotCommand, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     PreCheckoutQueryHandler,
+    CallbackQueryHandler,
     ContextTypes,
     filters,
 )
@@ -34,7 +35,7 @@ from telegram.constants import ParseMode, ChatAction
 from datetime import date
 
 from config import TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, PDF_DIR
-from analyzer import analyze_match, format_summary, analyze_cs2, format_cs2_summary
+from analyzer import analyze_match, format_summary, analyze_cs2, format_cs2_summary, analyze_dota2, format_dota2_summary
 from pdf_generator import generate_pdf
 import database as db
 
@@ -81,30 +82,105 @@ def _use_request(user_id: int):
 # COMMAND HANDLERS
 # ═══════════════════════════════════════════════════════════
 
-async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /start command."""
+def _lang_suffix(user_id):
+    """Return language instruction for Claude prompts."""
+    lang = db.get_language(user_id)
+    if lang == "en":
+        return "\n\nIMPORTANT: Respond ENTIRELY in English. All text, profiles, factors, verdict — in English."
+    return "\n\nВАЖНО: Отвечай ПОЛНОСТЬЮ на русском языке."
+
+
+async def cmd_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Switch bot language."""
     user_id = update.effective_user.id
-    is_owner = user_id == OWNER_ID
-    limit_text = "♾ Безлимитный доступ" if is_owner or db.is_vip(user_id) else f"📊 {DAILY_FREE_LIMIT} анализов в день бесплатно"
-    text = (
-        "🎾 <b>Tennis Analyst Bot</b>\n\n"
-        "Я анализирую теннисные матчи ATP и WTA с расчётом вероятностей, "
-        "факторным анализом и генерацией PDF-отчётов.\n\n"
-        "<b>Как использовать:</b>\n"
-        "• /analyze Зверев vs Ходар, RG QF\n"
-        "• /analyze Fonseca vs Mensik, Roland Garros\n"
-        "• /quick Andreeva vs Cirstea\n\n"
-        "Или просто напиши имена игроков:\n"
-        "• <i>Фонсека Менсик</i>\n\n"
-        "📄 /analyze — полный анализ + PDF (3 стр.)\n"
-        "⚡ /quick — быстрый текстовый анализ\n"
-        "📅 /today — матчи сегодня\n"
-        "📊 /mystats — мой лимит запросов\n"
-        "❓ /help — все команды\n\n"
-        f"{limit_text}\n\n"
-        "<i>Методология v3 | Claude AI + Bo3/Bo5 модель</i>"
+    args = context.args
+
+    if not args:
+        current = db.get_language(user_id)
+        await update.message.reply_text(
+            f"🌍 <b>Language / Язык</b>\n\n"
+            f"Current: <b>{'🇷🇺 Русский' if current == 'ru' else '🇬🇧 English'}</b>\n\n"
+            f"Switch / Переключить:\n"
+            f"  <code>/lang en</code> — English\n"
+            f"  <code>/lang ru</code> — Русский",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    lang = args[0].lower()
+    if lang in ("en", "eng", "english"):
+        db.set_language(user_id, "en")
+        await update.message.reply_text("🇬🇧 Language set to <b>English</b>. All analyses will be in English now.", parse_mode=ParseMode.HTML)
+    elif lang in ("ru", "rus", "russian", "русский"):
+        db.set_language(user_id, "ru")
+        await update.message.reply_text("🇷🇺 Язык установлен: <b>Русский</b>. Все анализы будут на русском.", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ Use: <code>/lang en</code> or <code>/lang ru</code>", parse_mode=ParseMode.HTML)
+
+
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /start — show language selection buttons."""
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang_en"),
+            InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
+        ]
+    ])
+    await update.message.reply_text(
+        "🎾 <b>Welcome / Добро пожаловать!</b>\n\n"
+        "Choose your language / Выберите язык:",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard,
     )
-    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle language selection from inline buttons."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang = "en" if query.data == "lang_en" else "ru"
+    db.set_language(user_id, lang)
+
+    is_owner = user_id == OWNER_ID
+    is_vip = db.is_vip(user_id)
+
+    if lang == "en":
+        limit_text = "♾ Unlimited access" if is_owner or is_vip else f"📊 {DAILY_FREE_LIMIT} free analyses per day"
+        text = (
+            "🎾 <b>Sports Analyst Bot</b>\n\n"
+            "I analyze tennis, CS2 & Dota 2 matches with probability calculations, "
+            "factor analysis and PDF reports.\n\n"
+            "<b>Commands:</b>\n"
+            "🎾 /analyze — Tennis analysis + PDF\n"
+            "🎮 /cs2 — CS2 analysis\n"
+            "⚔️ /dota2 — Dota 2 analysis\n"
+            "⚡ /quick — Quick text analysis\n"
+            "📅 /today — Today's matches\n"
+            "🌍 /lang — Switch language\n"
+            "❓ /help — All commands\n\n"
+            f"{limit_text}\n\n"
+            "<i>Methodology v3 | Claude AI + math model</i>"
+        )
+    else:
+        limit_text = "♾ Безлимитный доступ" if is_owner or is_vip else f"📊 {DAILY_FREE_LIMIT} анализа в день бесплатно"
+        text = (
+            "🎾 <b>Sports Analyst Bot</b>\n\n"
+            "Я анализирую матчи тенниса, CS2 и Dota 2 с расчётом вероятностей, "
+            "факторным анализом и PDF-отчётами.\n\n"
+            "<b>Команды:</b>\n"
+            "🎾 /analyze — Теннис анализ + PDF\n"
+            "🎮 /cs2 — CS2 анализ\n"
+            "⚔️ /dota2 — Dota 2 анализ\n"
+            "⚡ /quick — Быстрый анализ\n"
+            "📅 /today — Матчи сегодня\n"
+            "🌍 /lang — Сменить язык\n"
+            "❓ /help — Все команды\n\n"
+            f"{limit_text}\n\n"
+            "<i>Методология v3 | Claude AI + мат. модель</i>"
+        )
+
+    await query.edit_message_text(text, parse_mode=ParseMode.HTML)
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -171,7 +247,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         # Run analysis
-        data = await analyze_match(query)
+        data = await analyze_match(query, _lang_suffix(user_id))
 
         # Save prediction to database for /results verification
         try:
@@ -266,7 +342,7 @@ async def cmd_quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_chat_action(ChatAction.TYPING)
         wait_msg = await update.message.reply_text(f"⚡ Быстрый анализ: <b>{query}</b>...", parse_mode=ParseMode.HTML)
 
-        data = await analyze_match(query)
+        data = await analyze_match(query, _lang_suffix(user_id))
         summary = format_summary(data)
 
         await wait_msg.delete()
@@ -506,7 +582,7 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.HTML,
         )
 
-        data = await analyze_cs2(query)
+        data = await analyze_cs2(query, _lang_suffix(user_id))
         summary = format_cs2_summary(data)
 
         # Save prediction
@@ -524,8 +600,23 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+        # Generate PDF
+        await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+        pdf_path = generate_pdf(data)
+
         await wait_msg.delete()
         await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+
+        # Send PDF
+        with open(pdf_path, "rb") as pdf_file:
+            t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+            t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+            await update.message.reply_document(
+                document=pdf_file, filename=os.path.basename(pdf_path),
+                caption=f"🎮 CS2 | {t1n} vs {t2n}",
+            )
+        try: os.remove(pdf_path)
+        except OSError: pass
 
     except Exception as e:
         logger.error(f"CS2 analysis error: {e}\n{traceback.format_exc()}")
@@ -536,6 +627,69 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"❌ Ошибка: <code>{str(e)[:200]}</code>\n\n"
             "Попробуй: <code>/cs2 NAVI vs Spirit, PGL Major</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    finally:
+        _active_users.discard(user_id)
+
+
+async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /dota2 command — Dota 2 match analysis."""
+    user_id = update.effective_user.id
+    query = " ".join(context.args) if context.args else ""
+    if not query:
+        await update.message.reply_text(
+            "⚔️ <b>Dota 2 Analyst</b>\n\n"
+            "Пример: <code>/dota2 Spirit vs Falcons, TI QF</code>\n"
+            "Или: <code>/dota2 Tundra vs Gaimin</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    allowed, _ = _check_limit(user_id)
+    if not allowed:
+        await update.message.reply_text(f"⛔ Лимит исчерпан. /subscribe для безлимита.")
+        return
+    if user_id in _active_users:
+        await update.message.reply_text("⏳ Подожди.")
+        return
+    _active_users.add(user_id)
+    _use_request(user_id)
+    try:
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        wait_msg = await update.message.reply_text(
+            f"⚔️ Анализирую Dota 2: <b>{query}</b>\n\nИщу данные на Liquipedia, dotabuff...",
+            parse_mode=ParseMode.HTML,
+        )
+        data = await analyze_dota2(query, _lang_suffix(user_id))
+        summary = format_dota2_summary(data)
+        try:
+            t1 = data.get("team1", {}); t2 = data.get("team2", {})
+            fav_idx = data.get("favorite", 1)
+            favd = t1 if fav_idx == 1 else t2
+            db.save_prediction(p1=t1.get("name","?"), p2=t2.get("name","?"),
+                prob=data.get("probability",0.5), fav=favd.get("name","?"),
+                tournament=data.get("tournament","Dota2"), confidence=data.get("confidence","?"))
+        except Exception: pass
+        # Generate PDF
+        await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+        pdf_path = generate_pdf(data)
+        await wait_msg.delete()
+        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+        with open(pdf_path, "rb") as pdf_file:
+            t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+            t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+            await update.message.reply_document(
+                document=pdf_file, filename=os.path.basename(pdf_path),
+                caption=f"⚔️ Dota 2 | {t1n} vs {t2n}",
+            )
+        try: os.remove(pdf_path)
+        except OSError: pass
+    except Exception as e:
+        logger.error(f"Dota2 error: {e}\n{traceback.format_exc()}")
+        try: await wait_msg.delete()
+        except Exception: pass
+        await update.message.reply_text(
+            f"❌ Ошибка: <code>{str(e)[:200]}</code>\n\nПопробуй: <code>/dota2 Spirit vs Falcons</code>",
             parse_mode=ParseMode.HTML,
         )
     finally:
@@ -740,7 +894,9 @@ async def post_init(app: Application):
         BotCommand("today", "📅 Матчи сегодня"),
         BotCommand("results", "📋 Проверка прогнозов"),
         BotCommand("follow", "⭐ Избранные игроки"),
-        BotCommand("cs2", "🎮 CS2 анализ матча"),
+        BotCommand("cs2", "🎮 CS2 анализ"),
+        BotCommand("dota2", "⚔️ Dota 2 анализ"),
+        BotCommand("lang", "🌍 Language / Язык"),
         BotCommand("subscribe", "⭐ VIP подписка"),
         BotCommand("accuracy", "📊 Статистика прогнозов"),
         BotCommand("mystats", "📊 Мой лимит"),
@@ -780,7 +936,10 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
+    app.add_handler(CommandHandler("lang", cmd_lang))
+    app.add_handler(CallbackQueryHandler(lang_callback, pattern="^lang_"))
     app.add_handler(CommandHandler("cs2", cmd_cs2))
+    app.add_handler(CommandHandler("dota2", cmd_dota2))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("accuracy", cmd_accuracy))
