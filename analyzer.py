@@ -3,7 +3,7 @@
 import json
 import math
 import anthropic
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SYSTEM_PROMPT
+from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SYSTEM_PROMPT, CS2_SYSTEM_PROMPT
 
 
 # ═══════════════════════════════════════════════════════════
@@ -311,6 +311,168 @@ def format_summary(data: dict) -> str:
     confidence = data.get("confidence", "")
     if confidence:
         lines.append(f"📌 Уверенность: <b>{confidence}</b>")
+
+    lines.append("")
+    lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
+
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+# CS2 ANALYSIS
+# ═══════════════════════════════════════════════════════════
+
+async def analyze_cs2(query: str) -> dict:
+    """Analyze a CS2 match using Claude API with web search."""
+    from datetime import date
+    today = date.today().strftime("%d %B %Y")
+
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+    user_prompt = (
+        f"Сегодня {today}. Проанализируй ПРЕДСТОЯЩИЙ матч CS2: {query}\n\n"
+        "ОБЯЗАТЕЛЬНО используй веб-поиск на HLTV.org и Liquipedia чтобы найти:\n"
+        "- Рейтинги HLTV обеих команд\n"
+        "- Составы и ростер-изменения\n"
+        "- Win% за 3 месяца (LAN + online)\n"
+        "- Map pool: win% на каждой карте, пермабаны\n"
+        "- H2H последние встречи\n"
+        "- Форму звёздных игроков\n"
+        "- Турнир, стадию, формат\n"
+        "НЕ используй устаревшие данные из памяти — ТОЛЬКО свежие из поиска.\n"
+        "Верни результат СТРОГО в формате JSON как описано в системном промпте."
+    )
+
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=16000,
+        system=CS2_SYSTEM_PROMPT,
+        tools=[{
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "max_uses": 5,
+        }],
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    # Extract JSON (same parser as tennis)
+    all_text = ""
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            all_text += "\n" + block.text
+
+    if not all_text.strip():
+        raise ValueError("Claude returned no text response")
+
+    text = all_text.strip()
+
+    if "```json" in text:
+        json_part = text.split("```json")[1].split("```")[0].strip()
+        try:
+            data = json.loads(json_part)
+            # Add Bo3 distribution
+            p = data.get("probability", 0.5)
+            fmt = data.get("format", "Bo3")
+            if fmt == "Bo5":
+                data["distribution"] = bo5_distribution(p)
+            elif fmt == "Bo1":
+                data["distribution"] = {"p_win": p}
+            else:
+                data["distribution"] = bo3_distribution(p)
+            return data
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: find largest JSON
+    data = None
+    best_len = 0
+    i = 0
+    while i < len(text):
+        if text[i] == '{':
+            depth = 0
+            start = i
+            for j in range(i, len(text)):
+                if text[j] == '{': depth += 1
+                elif text[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        candidate = text[start:j+1]
+                        if len(candidate) > best_len:
+                            try:
+                                parsed = json.loads(candidate)
+                                if isinstance(parsed, dict) and ("team1" in parsed or "probability" in parsed):
+                                    data = parsed
+                                    best_len = len(candidate)
+                            except json.JSONDecodeError:
+                                pass
+                        break
+        i += 1
+
+    if data is None:
+        raise ValueError(f"Could not extract JSON from CS2 response ({len(text)} chars)")
+
+    p = data.get("probability", 0.5)
+    fmt = data.get("format", "Bo3")
+    if fmt == "Bo5":
+        data["distribution"] = bo5_distribution(p)
+    elif fmt == "Bo1":
+        data["distribution"] = {"p_win": p}
+    else:
+        data["distribution"] = bo3_distribution(p)
+
+    return data
+
+
+def format_cs2_summary(data: dict) -> str:
+    """Format CS2 analysis for Telegram."""
+    p = data.get("probability", 0.5)
+    fav_idx = data.get("favorite", 1)
+    t1 = data.get("team1", {})
+    t2 = data.get("team2", {})
+    fav = t1 if fav_idx == 1 else t2
+    dog = t2 if fav_idx == 1 else t1
+    fav_pct = round(p * 100)
+    dist = data.get("distribution", {})
+
+    lines = []
+    lines.append(f"🎮 <b>CS2 | {data.get('tournament', '')} | {data.get('stage', '')}</b>")
+    lines.append(f"📅 {data.get('date', '')} | {data.get('format', 'Bo3')}")
+    lines.append("")
+    lines.append(f"<b>{t1.get('name', '')} [{t1.get('short', '')}]</b>  vs  <b>{t2.get('name', '')} [{t2.get('short', '')}]</b>")
+    lines.append(f"HLTV #{t1.get('hltv_rank', '?')} | HLTV #{t2.get('hltv_rank', '?')}")
+    lines.append("")
+
+    bar_len = 20
+    fav_blocks = round(bar_len * p)
+    bar = "🟩" * fav_blocks + "🟥" * (bar_len - fav_blocks)
+    lines.append(bar)
+    lines.append(f"<b>{fav.get('short', fav.get('name', ''))} {fav_pct}%</b> — {dog.get('short', dog.get('name', ''))} {100 - fav_pct}%")
+    lines.append("")
+
+    # Map veto
+    veto = data.get("map_veto", {})
+    maps = veto.get("expected_maps", [])
+    if maps:
+        lines.append("🗺 <b>Ожидаемые карты:</b>")
+        for m in maps:
+            lines.append(f"  {m}")
+        lines.append("")
+
+    # Factors
+    factors = data.get("factors", [])
+    if factors:
+        lines.append("⚖️ <b>Факторы:</b>")
+        for f in factors[:6]:
+            lines.append(f"  {f.get('num', '')}. {f.get('name', '')}: {f.get('shift', '')}")
+        lines.append("")
+
+    # Verdict
+    verdict = data.get("verdict", "")
+    if verdict:
+        lines.append(f"🏆 <b>Вердикт:</b>")
+        if len(verdict) > 350:
+            verdict = verdict[:347] + "..."
+        lines.append(verdict)
 
     lines.append("")
     lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")

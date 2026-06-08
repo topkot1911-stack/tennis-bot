@@ -34,7 +34,7 @@ from telegram.constants import ParseMode, ChatAction
 from datetime import date
 
 from config import TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, PDF_DIR
-from analyzer import analyze_match, format_summary
+from analyzer import analyze_match, format_summary, analyze_cs2, format_cs2_summary
 from pdf_generator import generate_pdf
 import database as db
 
@@ -471,6 +471,77 @@ async def cmd_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Неверный ID. Используй: /vip 123456789")
 
 
+async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /cs2 command — CS2 match analysis."""
+    user_id = update.effective_user.id
+    query = " ".join(context.args) if context.args else ""
+
+    if not query:
+        await update.message.reply_text(
+            "🎮 <b>CS2 Analyst</b>\n\n"
+            "Пример: <code>/cs2 NAVI vs Spirit, PGL Major QF</code>\n"
+            "Или: <code>/cs2 G2 vs FaZe</code>",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    allowed, remaining = _check_limit(user_id)
+    if not allowed:
+        await update.message.reply_text(
+            f"⛔ Лимит исчерпан. /subscribe для безлимита.",
+        )
+        return
+
+    if user_id in _active_users:
+        await update.message.reply_text("⏳ Подожди, предыдущий запрос выполняется.")
+        return
+
+    _active_users.add(user_id)
+    _use_request(user_id)
+    try:
+        await update.message.reply_chat_action(ChatAction.TYPING)
+        wait_msg = await update.message.reply_text(
+            f"🎮 Анализирую CS2: <b>{query}</b>\n\n"
+            "Ищу данные на HLTV.org, map pool, H2H...",
+            parse_mode=ParseMode.HTML,
+        )
+
+        data = await analyze_cs2(query)
+        summary = format_cs2_summary(data)
+
+        # Save prediction
+        try:
+            t1 = data.get("team1", {})
+            t2 = data.get("team2", {})
+            fav_idx = data.get("favorite", 1)
+            favd = t1 if fav_idx == 1 else t2
+            db.save_prediction(
+                p1=t1.get("name", "?"), p2=t2.get("name", "?"),
+                prob=data.get("probability", 0.5), fav=favd.get("name", "?"),
+                tournament=data.get("tournament", "CS2"),
+                confidence=data.get("confidence", "?"),
+            )
+        except Exception:
+            pass
+
+        await wait_msg.delete()
+        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+
+    except Exception as e:
+        logger.error(f"CS2 analysis error: {e}\n{traceback.format_exc()}")
+        try:
+            await wait_msg.delete()
+        except Exception:
+            pass
+        await update.message.reply_text(
+            f"❌ Ошибка: <code>{str(e)[:200]}</code>\n\n"
+            "Попробуй: <code>/cs2 NAVI vs Spirit, PGL Major</code>",
+            parse_mode=ParseMode.HTML,
+        )
+    finally:
+        _active_users.discard(user_id)
+
+
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner-only: export all predictions as CSV file."""
     if update.effective_user.id != OWNER_ID:
@@ -669,6 +740,7 @@ async def post_init(app: Application):
         BotCommand("today", "📅 Матчи сегодня"),
         BotCommand("results", "📋 Проверка прогнозов"),
         BotCommand("follow", "⭐ Избранные игроки"),
+        BotCommand("cs2", "🎮 CS2 анализ матча"),
         BotCommand("subscribe", "⭐ VIP подписка"),
         BotCommand("accuracy", "📊 Статистика прогнозов"),
         BotCommand("mystats", "📊 Мой лимит"),
@@ -708,6 +780,7 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
+    app.add_handler(CommandHandler("cs2", cmd_cs2))
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("accuracy", cmd_accuracy))
