@@ -769,26 +769,41 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner-only: export all predictions as CSV file."""
+    """Owner-only: export all data (CSV + JSON) for Cowork analysis."""
     if update.effective_user.id != OWNER_ID:
         await update.message.reply_text("⛔ Только владелец может экспортировать данные.")
         return
 
-    csv_data = db.export_csv()
-    if not csv_data:
+    stats = db.get_prediction_stats()
+    if stats["total"] == 0:
         await update.message.reply_text("📋 Нет сохранённых прогнозов.")
         return
 
-    # Send as file
     import io
-    f = io.BytesIO(csv_data.encode("utf-8"))
-    f.name = "predictions_export.csv"
-    stats = db.get_prediction_stats()
+
+    # 1. Send CSV
+    csv_data = db.export_csv()
+    f_csv = io.BytesIO(csv_data.encode("utf-8"))
     await update.message.reply_document(
-        document=f,
+        document=f_csv,
         filename="predictions_export.csv",
-        caption=f"📊 Экспорт: {stats['total']} прогнозов\n"
-                f"Скинь этот файл в Cowork для анализа точности и улучшения модели.",
+        caption=f"📊 CSV: {stats['total']} прогнозов",
+    )
+
+    # 2. Send full JSON (for Cowork)
+    json_data = db.export_full_json()
+    f_json = io.BytesIO(json_data.encode("utf-8"))
+    await update.message.reply_document(
+        document=f_json,
+        filename="bot_full_export.json",
+        caption=(
+            f"📦 Полный экспорт для Cowork:\n"
+            f"• {stats['total']} прогнозов\n"
+            f"• VIP пользователи\n"
+            f"• Избранные игроки\n"
+            f"• Статистика использования\n\n"
+            f"Загрузи этот файл в Claude Cowork для анализа точности и улучшения модели."
+        ),
     )
 
 

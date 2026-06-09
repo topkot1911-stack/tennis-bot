@@ -188,5 +188,34 @@ def get_language(user_id):
     return row["lang"] if row else "ru"
 
 
+def export_full_json():
+    """Export all data as JSON string for Cowork analysis."""
+    import json as _json
+    conn = _conn()
+    preds = [dict(r) for r in conn.execute("SELECT * FROM predictions ORDER BY date DESC").fetchall()]
+    vips = [dict(r) for r in conn.execute("SELECT * FROM vip_users").fetchall()]
+    follows = [dict(r) for r in conn.execute("SELECT * FROM follows").fetchall()]
+    usage = [dict(r) for r in conn.execute("SELECT * FROM usage ORDER BY date DESC LIMIT 30").fetchall()]
+    conn.close()
+
+    stats = get_prediction_stats()
+    by_date = {}
+    for p in preds:
+        d = p.get("date", "?")
+        if d not in by_date:
+            by_date[d] = []
+        by_date[d].append(p)
+
+    return _json.dumps({
+        "export_date": date.today().isoformat(),
+        "total_predictions": stats["total"],
+        "predictions_by_date": stats["by_date"],
+        "all_predictions": preds,
+        "vip_users": vips,
+        "follows": follows,
+        "recent_usage": usage,
+    }, ensure_ascii=False, indent=2)
+
+
 # Initialize on import
 init_db()
