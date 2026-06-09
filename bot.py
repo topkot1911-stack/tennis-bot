@@ -410,10 +410,11 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if lang == "en":
             prompt = (
                 f"Today is {today}. Use web search to find matches scheduled for today.\n\n"
-                "Search queries to use:\n"
-                f"1. Search: 'tennis schedule today {today} ATP WTA'\n"
-                f"2. Search: 'CS2 matches today {today} HLTV'\n"
-                f"3. Search: 'Dota 2 matches today {today}'\n\n"
+                "Do these EXACT searches:\n"
+                f"1. Search: 'ATP results today' on flashscore.com\n"
+                f"2. Search: 'WTA results today' on flashscore.com\n"
+                f"3. Search: 'HLTV matches today CS2'\n"
+                f"4. Search: 'Dota 2 matches today liquipedia'\n\n"
                 "Based on search results, compile the schedule in this EXACT format:\n\n"
                 "🎾 TENNIS\n"
                 "• 11:00 — A. Sinner vs R. Nadal | ATP Stuttgart, R2\n"
@@ -433,10 +434,11 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             prompt = (
                 f"Сегодня {today}. Используй веб-поиск для поиска матчей на сегодня.\n\n"
-                "Выполни поиски:\n"
-                f"1. Поиск: 'tennis schedule today {today} ATP WTA results'\n"
-                f"2. Поиск: 'CS2 matches today {today} HLTV schedule'\n"
-                f"3. Поиск: 'Dota 2 matches today {today} schedule'\n\n"
+                "Выполни ИМЕННО ЭТИ поиски:\n"
+                f"1. Поиск: 'ATP results today' на flashscore.com\n"
+                f"2. Поиск: 'WTA results today' на flashscore.com\n"
+                f"3. Поиск: 'HLTV matches today CS2'\n"
+                f"4. Поиск: 'Dota 2 matches today liquipedia'\n\n"
                 "На основе результатов поиска составь расписание СТРОГО в этом формате:\n\n"
                 "🎾 ТЕННИС\n"
                 "• 11:00 — А. Синнер vs Р. Надаль | ATP Штутгарт, R2\n"
