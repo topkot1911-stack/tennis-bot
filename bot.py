@@ -82,6 +82,40 @@ def _use_request(user_id: int):
 # COMMAND HANDLERS
 # ═══════════════════════════════════════════════════════════
 
+import re
+
+def _clean_html(text: str) -> str:
+    """Remove unsupported HTML tags, keep only Telegram-safe ones."""
+    safe_tags = ['b', 'i', 'u', 's', 'code', 'pre', 'a']
+    # Remove all tags except safe ones
+    def replace_tag(match):
+        tag = match.group(1).split()[0].strip('/').lower()
+        if tag in safe_tags:
+            return match.group(0)
+        return ''
+    cleaned = re.sub(r'<(/?\w[^>]*)>', replace_tag, text)
+    # Fix unclosed tags
+    for tag in safe_tags:
+        opens = cleaned.count(f'<{tag}>')
+        closes = cleaned.count(f'</{tag}>')
+        for _ in range(opens - closes):
+            cleaned += f'</{tag}>'
+    return cleaned
+
+
+async def _safe_reply(message, text, **kwargs):
+    """Send message with HTML, fallback to plain text if parsing fails."""
+    text = _clean_html(text)
+    if len(text) > 4000:
+        text = text[:3997] + "..."
+    try:
+        await message.reply_text(text, parse_mode=ParseMode.HTML, **kwargs)
+    except Exception:
+        # Fallback: strip ALL HTML
+        plain = re.sub(r'<[^>]+>', '', text)
+        await message.reply_text(plain, **kwargs)
+
+
 def _lang_suffix(user_id):
     """Return language instruction for Claude prompts."""
     lang = db.get_language(user_id)
@@ -269,7 +303,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Send summary
         await wait_msg.delete()
-        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+        await _safe_reply(update.message, summary)
 
         # Generate and send PDF (skip if raw text fallback)
         if "_raw_text" not in data:
@@ -343,7 +377,7 @@ async def cmd_quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = format_summary(data)
 
         await wait_msg.delete()
-        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+        await _safe_reply(update.message, summary)
 
     except Exception as e:
         logger.error(f"Quick analysis error: {e}")
@@ -463,7 +497,7 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(full_text) > 4000:
             full_text = full_text[:3997] + "..."
 
-        await update.message.reply_text(full_text, parse_mode=ParseMode.HTML)
+        await _safe_reply(update.message, full_text)
 
         # Generate PDF with today's schedule
         try:
@@ -675,7 +709,7 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
         await wait_msg.delete()
-        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+        await _safe_reply(update.message, summary)
 
         if "_raw_text" not in data:
             await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
@@ -743,7 +777,7 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 tournament=data.get("tournament","Dota2"), confidence=data.get("confidence","?"))
         except Exception: pass
         await wait_msg.delete()
-        await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
+        await _safe_reply(update.message, summary)
         if "_raw_text" not in data:
             await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
             pdf_path = generate_pdf(data)
