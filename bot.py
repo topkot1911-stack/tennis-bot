@@ -786,49 +786,78 @@ async def cmd_accuracy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check yesterday's predictions against actual results via web search."""
-    from datetime import timedelta
+    """Check ALL predictions against actual results via web search."""
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
     user_id = update.effective_user.id
+    lang = db.get_language(user_id)
+
     if user_id != OWNER_ID and not db.is_vip(user_id):
         await update.message.reply_text(
-            "⭐ Проверка прогнозов — функция VIP.\n"
-            "Подключи VIP: /subscribe",
+            "⭐ Проверка прогнозов — функция VIP.\n/subscribe" if lang == "ru"
+            else "⭐ Results check is VIP only.\n/subscribe",
         )
         return
 
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
-    preds = db.get_predictions(yesterday)
+    # Get ALL predictions
+    all_preds = db.get_all_predictions()
 
-    if not preds:
-        await update.message.reply_text(
-            "📋 Нет прогнозов за вчера для проверки.\n"
-            "Сделай /analyze на предстоящий матч — завтра сможешь проверить!",
-        )
+    if not all_preds:
+        msg = ("📋 Нет сохранённых прогнозов.\nСделай /analyze — потом проверишь!" if lang == "ru"
+               else "📋 No predictions saved yet.\nUse /analyze first!")
+        await update.message.reply_text(msg)
         return
 
     await update.message.reply_chat_action(ChatAction.TYPING)
-    wait_msg = await update.message.reply_text("🔍 Проверяю вчерашние прогнозы...")
+    wait_msg = await update.message.reply_text(
+        "🔍 Проверяю все прогнозы..." if lang == "ru" else "🔍 Checking all predictions..."
+    )
 
     try:
-        matches_text = "\n".join(
-            f"- {p['p1']} vs {p['p2']}: прогноз {p['fav']} {round(p['prob']*100)}%"
-            for p in preds
-        )
+        # Group by date
+        by_date = {}
+        for p in all_preds:
+            d = p.get("date", "?")
+            if d not in by_date:
+                by_date[d] = []
+            by_date[d].append(p)
+
+        matches_text = ""
+        for d in sorted(by_date.keys()):
+            matches_text += f"\n[{d}]:\n"
+            for p in by_date[d]:
+                matches_text += f"- {p['p1']} vs {p['p2']}: прогноз {p['fav']} {round(p['prob']*100)}% ({p.get('tournament','?')})\n"
+
+        if lang == "en":
+            prompt = (
+                f"Here are ALL predictions made by our bot. Search the web and find the actual results "
+                f"for EACH match. Compare predictions with results.\n\n"
+                f"{matches_text}\n\n"
+                "For each match write ONE line:\n"
+                "✅ Player1 vs Player2 — predicted: Fav 65% — result: Fav won 6-4 6-3 — CORRECT\n"
+                "❌ Player1 vs Player2 — predicted: Fav 70% — result: Dog won 3-6 6-4 7-5 — WRONG\n"
+                "⏳ Player1 vs Player2 — not yet played\n\n"
+                "At the end: TOTAL: X correct / Y wrong / Z pending out of N total. Accuracy: X/Y = NN%"
+            )
+        else:
+            prompt = (
+                f"Вот ВСЕ прогнозы нашего бота. Найди через веб-поиск реальные результаты "
+                f"КАЖДОГО матча. Сравни прогнозы с результатами.\n\n"
+                f"{matches_text}\n\n"
+                "Для каждого матча напиши ОДНУ строку:\n"
+                "✅ Игрок1 vs Игрок2 — прогноз: Фаворит 65% — результат: Фаворит выиграл 6-4 6-3 — ВЕРНО\n"
+                "❌ Игрок1 vs Игрок2 — прогноз: Фаворит 70% — результат: Аутсайдер выиграл 3-6 6-4 7-5 — НЕВЕРНО\n"
+                "⏳ Игрок1 vs Игрок2 — ещё не сыгран\n\n"
+                "В конце: ИТОГО: X верных / Y неверных / Z не сыграно из N всего. Точность: X/(X+Y) = NN%"
+            )
 
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=2000,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 3}],
-            messages=[{"role": "user", "content":
-                f"Найди результаты вчерашних теннисных матчей ({yesterday}) и сравни с прогнозами:\n"
-                f"{matches_text}\n\n"
-                "Для каждого матча напиши: счёт, кто выиграл, прогноз верный или нет.\n"
-                "В конце: общая статистика X из Y верных. Ответ на русском, кратко."
-            }],
+            max_tokens=6000,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+            messages=[{"role": "user", "content": prompt}],
         )
 
         text = ""
@@ -839,10 +868,10 @@ async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait_msg.delete()
         if len(text) > 4000:
             text = text[:3997] + "..."
-        await update.message.reply_text(
-            f"📋 <b>Проверка прогнозов за {yesterday}</b>\n\n{text}",
-            parse_mode=ParseMode.HTML,
-        )
+
+        header = f"📋 <b>Проверка всех прогнозов ({len(all_preds)} шт.)</b>" if lang == "ru" else f"📋 <b>All predictions check ({len(all_preds)} total)</b>"
+        await update.message.reply_text(f"{header}\n\n{text}", parse_mode=ParseMode.HTML)
+
     except Exception as e:
         logger.error(f"Results error: {e}")
         try:
