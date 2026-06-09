@@ -307,18 +307,22 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Generate and send PDF (skip if raw text fallback)
         if "_raw_text" not in data:
-            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-            pdf_path = generate_pdf(data)
-            with open(pdf_path, "rb") as pdf_file:
-                fav = data.get("player1", {}) if data.get("favorite", 1) == 1 else data.get("player2", {})
-                dog = data.get("player2", {}) if data.get("favorite", 1) == 1 else data.get("player1", {})
-                caption = (
-                    f"📄 {fav.get('name', '')} vs {dog.get('name', '')}\n"
-                    f"🏆 {fav.get('name', '')} {round(data.get('probability', 0.5) * 100)}%"
-                )
-                await update.message.reply_document(
-                    document=pdf_file, filename=os.path.basename(pdf_path), caption=caption,
-                )
+            try:
+                await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+                pdf_path = generate_pdf(data)
+                with open(pdf_path, "rb") as pdf_file:
+                    fav = data.get("player1", {}) if data.get("favorite", 1) == 1 else data.get("player2", {})
+                    dog = data.get("player2", {}) if data.get("favorite", 1) == 1 else data.get("player1", {})
+                    fn = fav.get('name', '') if isinstance(fav.get('name'), str) else '?'
+                    dn = dog.get('name', '') if isinstance(dog.get('name'), str) else '?'
+                    caption = f"📄 {fn} vs {dn} | {fn} {round(data.get('probability', 0.5) * 100)}%"
+                    await update.message.reply_document(
+                        document=pdf_file, filename=os.path.basename(pdf_path), caption=caption,
+                    )
+                try: os.remove(pdf_path)
+                except OSError: pass
+            except Exception as pdf_err:
+                logger.error(f"PDF generation error: {pdf_err}")
 
         # Cleanup
         try:

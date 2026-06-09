@@ -187,12 +187,17 @@ def generate_pdf(data: dict) -> str:
     y -= 7 * mm
 
     # Profiles
-    for player, label in [(p1, f"ПРОФИЛЬ: {p1['name'].upper()}"),
-                           (p2, f"ПРОФИЛЬ: {p2['name'].upper()}")]:
+    for player, label in [(p1, f"ПРОФИЛЬ: {p1.get('name', '?').upper() if isinstance(p1.get('name'), str) else '?'}"),
+                           (p2, f"ПРОФИЛЬ: {p2.get('name', '?').upper() if isinstance(p2.get('name'), str) else '?'}")]:
         y = _sbar(c, label, y, gap=2 * mm)
         c.setFont(DJS, 6)
         c.setFillColor(BLACK)
-        for line in player.get("profile", [])[:6]:
+        profile = player.get("profile", [])
+        if isinstance(profile, str):
+            profile = [profile]
+        elif not isinstance(profile, list):
+            profile = [str(profile)]
+        for line in profile[:6]:
             y -= 3 * mm
             c.drawString(TLM, y, str(line)[:125])
         y -= 1 * mm
@@ -315,18 +320,18 @@ def generate_pdf(data: dict) -> str:
 
     # Style analysis
     style = data.get("style_analysis", "")
-    if style:
+    if style and isinstance(style, str):
         y = _sbar(c, "СТИЛИСТИЧЕСКИЙ РАЗБОР", y, gap=2 * mm)
         c.setFont(DJS, 6)
         c.setFillColor(BLACK)
-        for line in _wrap(c, style, DJS, 6, mw):
+        for line in _wrap(c, str(style), DJS, 6, mw):
             y -= 2.8 * mm
             c.drawString(TLM, y, line)
         y -= 2 * mm
 
     # Conditions
     conditions = data.get("conditions", "")
-    if conditions:
+    if conditions and isinstance(conditions, str):
         y = _sbar(c, "УСЛОВИЯ И ФИЗИЧЕСКИЙ ФАКТОР", y, gap=2 * mm)
         c.setFont(DJS, 6)
         c.setFillColor(BLACK)
