@@ -413,12 +413,18 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if lang == "en":
             prompt = (
-                f"Today is {today}. Use web search to find matches scheduled for today.\n\n"
-                "Do these EXACT searches:\n"
-                f"1. Search: 'ATP results today' on flashscore.com\n"
-                f"2. Search: 'WTA results today' on flashscore.com\n"
-                f"3. Search: 'HLTV matches today CS2'\n"
-                f"4. Search: 'Dota 2 matches today liquipedia'\n\n"
+                f"Today is {today}. Find ALL matches happening today. Do MULTIPLE searches:\n\n"
+                "TENNIS searches:\n"
+                f"1. 'ATP tennis scores today {today}'\n"
+                f"2. 'WTA tennis scores today {today}'\n"
+                f"3. 'ATP Stuttgart Boss Open order of play today'\n"
+                f"4. 'ATP s-Hertogenbosch Libema Open order of play today'\n"
+                f"5. 'WTA London HSBC Championships order of play today'\n"
+                "CS2 searches:\n"
+                f"6. 'HLTV matches today'\n"
+                f"7. 'IEM Cologne Major 2026 schedule today'\n"
+                "DOTA 2 searches:\n"
+                f"8. 'Dota 2 matches today schedule'\n\n"
                 "Based on search results, compile the schedule in this EXACT format:\n\n"
                 "🎾 TENNIS\n"
                 "• 11:00 — A. Sinner vs R. Nadal | ATP Stuttgart, R2\n"
@@ -437,12 +443,18 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             prompt = (
-                f"Сегодня {today}. Используй веб-поиск для поиска матчей на сегодня.\n\n"
-                "Выполни ИМЕННО ЭТИ поиски:\n"
-                f"1. Поиск: 'ATP results today' на flashscore.com\n"
-                f"2. Поиск: 'WTA results today' на flashscore.com\n"
-                f"3. Поиск: 'HLTV matches today CS2'\n"
-                f"4. Поиск: 'Dota 2 matches today liquipedia'\n\n"
+                f"Сегодня {today}. Найди ВСЕ матчи на сегодня. Сделай НЕСКОЛЬКО поисков:\n\n"
+                "ТЕННИС:\n"
+                f"1. 'ATP tennis scores today {today}'\n"
+                f"2. 'WTA tennis scores today {today}'\n"
+                f"3. 'ATP Stuttgart Boss Open order of play today'\n"
+                f"4. 'ATP s-Hertogenbosch Libema Open order of play today'\n"
+                f"5. 'WTA London HSBC Championships order of play today'\n"
+                "CS2:\n"
+                f"6. 'HLTV matches today'\n"
+                f"7. 'IEM Cologne Major 2026 schedule today'\n"
+                "DOTA 2:\n"
+                f"8. 'Dota 2 matches today schedule'\n\n"
                 "На основе результатов поиска составь расписание СТРОГО в этом формате:\n\n"
                 "🎾 ТЕННИС\n"
                 "• 11:00 — А. Синнер vs Р. Надаль | ATP Штутгарт, R2\n"
@@ -460,10 +472,12 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "- НИКАКИХ оговорок, извинений, объяснений. ТОЛЬКО список матчей."
             )
 
+        # Use Sonnet for /today — better search quality, finds more matches
+        today_model = os.getenv("TODAY_MODEL", "claude-sonnet-4-6")
         response = client.messages.create(
-            model=CLAUDE_MODEL,
+            model=today_model,
             max_tokens=8000,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 10}],
             messages=[{"role": "user", "content": prompt}],
         )
 
