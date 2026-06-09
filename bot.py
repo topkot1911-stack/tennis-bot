@@ -1001,7 +1001,7 @@ async def cmd_follow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"⭐ <b>{player}</b> добавлен в избранные!\n\n"
         f"Всего избранных: {len(follows)}\n"
-        "Используй /today — матчи избранных будут отмечены.",
+        "Используй /analyze, /cs2, /dota2 для анализа матчей избранных.",
         parse_mode=ParseMode.HTML,
     )
 
