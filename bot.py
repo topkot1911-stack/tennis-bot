@@ -375,43 +375,49 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if lang == "en":
             prompt = (
-                f"Today is {today}. Search the web and give me TODAY's match schedule.\n\n"
-                "Search: flashscore.com for tennis, hltv.org/matches for CS2, liquipedia.net for Dota 2.\n\n"
-                "RESPOND IN THIS EXACT FORMAT (no other text before or after):\n\n"
+                f"Today is {today}. Use web search to find matches scheduled for today.\n\n"
+                "Search queries to use:\n"
+                f"1. Search: 'tennis schedule today {today} ATP WTA'\n"
+                f"2. Search: 'CS2 matches today {today} HLTV'\n"
+                f"3. Search: 'Dota 2 matches today {today}'\n\n"
+                "Based on search results, compile the schedule in this EXACT format:\n\n"
                 "🎾 TENNIS\n"
                 "• 11:00 — A. Sinner vs R. Nadal | ATP Stuttgart, R2\n"
-                "• 14:00 — S. Tsitsipas vs D. Medvedev | ATP Stuttgart, QF\n"
-                "• 15:30 — I. Swiatek vs A. Sabalenka | WTA London, SF\n\n"
+                "• 14:00 — S. Tsitsipas vs D. Medvedev | ATP Stuttgart, QF\n\n"
                 "🎮 CS2\n"
-                "• 14:00 — NAVI vs G2 | IEM Cologne Major, Stage 2, Bo3\n"
-                "• 16:30 — FaZe vs Vitality | IEM Cologne Major, Stage 2, Bo3\n\n"
+                "• 14:00 — NAVI vs G2 | IEM Cologne, Bo3\n\n"
                 "⚔️ DOTA 2\n"
-                "• 12:00 — Spirit vs Falcons | TI Qualifier, UB R1, Bo3\n\n"
-                "RULES:\n"
-                "- ALWAYS include match START TIME (in CEST or local timezone)\n"
-                "- Each line: TIME — PLAYER/TEAM vs PLAYER/TEAM | Tournament, Round\n"
-                "- If no matches for a sport: write 'No matches today'\n"
-                "- NO explanations, NO paragraphs, ONLY the list above"
+                "• 12:00 — Spirit vs Falcons | ESL, Bo3\n\n"
+                "CRITICAL RULES:\n"
+                "- You MUST use web search. Do NOT say 'I cannot access' or 'visit the site'.\n"
+                "- List EVERY match you find from search results.\n"
+                "- Include time if found. If time unknown write 'TBD'.\n"
+                "- If search finds no matches for a sport, write: 'No matches found'\n"
+                "- NEVER suggest user to visit websites. YOU provide the data.\n"
+                "- NO disclaimers, NO apologies, NO explanations. ONLY the match list."
             )
         else:
             prompt = (
-                f"Сегодня {today}. Найди расписание матчей на сегодня.\n\n"
-                "Ищи: flashscore.com (теннис), hltv.org/matches (CS2), liquipedia.net (Dota 2).\n\n"
-                "ОТВЕЧАЙ СТРОГО В ТАКОМ ФОРМАТЕ (без другого текста):\n\n"
+                f"Сегодня {today}. Используй веб-поиск для поиска матчей на сегодня.\n\n"
+                "Выполни поиски:\n"
+                f"1. Поиск: 'tennis schedule today {today} ATP WTA results'\n"
+                f"2. Поиск: 'CS2 matches today {today} HLTV schedule'\n"
+                f"3. Поиск: 'Dota 2 matches today {today} schedule'\n\n"
+                "На основе результатов поиска составь расписание СТРОГО в этом формате:\n\n"
                 "🎾 ТЕННИС\n"
                 "• 11:00 — А. Синнер vs Р. Надаль | ATP Штутгарт, R2\n"
-                "• 14:00 — С. Циципас vs Д. Медведев | ATP Штутгарт, QF\n"
-                "• 15:30 — И. Свиатек vs А. Сабаленка | WTA Лондон, SF\n\n"
+                "• 14:00 — С. Циципас vs Д. Медведев | ATP Штутгарт, QF\n\n"
                 "🎮 CS2\n"
-                "• 14:00 — NAVI vs G2 | IEM Cologne Major, Stage 2, Bo3\n"
-                "• 16:30 — FaZe vs Vitality | IEM Cologne Major, Stage 2, Bo3\n\n"
+                "• 14:00 — NAVI vs G2 | IEM Cologne, Bo3\n\n"
                 "⚔️ DOTA 2\n"
-                "• 12:00 — Spirit vs Falcons | TI Qualifier, UB R1, Bo3\n\n"
-                "ПРАВИЛА:\n"
-                "- ВСЕГДА указывай ВРЕМЯ НАЧАЛА матча (CEST или МСК)\n"
-                "- Формат строки: ВРЕМЯ — ИГРОК/КОМАНДА vs ИГРОК/КОМАНДА | Турнир, Раунд\n"
-                "- Если матчей нет — пиши 'Нет матчей сегодня'\n"
-                "- НИКАКИХ объяснений, абзацев — ТОЛЬКО список выше"
+                "• 12:00 — Spirit vs Falcons | ESL, Bo3\n\n"
+                "КРИТИЧЕСКИ ВАЖНО:\n"
+                "- Ты ОБЯЗАН использовать веб-поиск. ЗАПРЕЩЕНО говорить 'не могу найти' или 'посетите сайт'.\n"
+                "- Перечисли КАЖДЫЙ матч который нашёл в результатах поиска.\n"
+                "- Если время неизвестно — пиши 'TBD'.\n"
+                "- Если матчей по дисциплине нет — пиши: 'Нет матчей'\n"
+                "- НИКОГДА не предлагай пользователю посещать сайты. ТЫ предоставляешь данные.\n"
+                "- НИКАКИХ оговорок, извинений, объяснений. ТОЛЬКО список матчей."
             )
 
         response = client.messages.create(
@@ -428,6 +434,25 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if not text.strip():
             text = "No matches found." if lang == "en" else "Не удалось найти расписание."
+
+        # Filter out refusal responses
+        refusal_words = ['не могу найти', 'cannot access', 'cannot find', 'посетите', 'visit the site',
+                         'не предусмотрен', 'не гарантирует', 'рекомендую проверить', 'recommend checking',
+                         'прямого доступа', 'direct access']
+        if any(w in text.lower() for w in refusal_words):
+            if lang == "en":
+                text = ("🎾 TENNIS\n• Check atptour.com for today's schedule\n\n"
+                        "🎮 CS2\n• Check hltv.org/matches for today's matches\n\n"
+                        "⚔️ DOTA 2\n• Check liquipedia.net for today's matches\n\n"
+                        "Use /analyze, /cs2, /dota2 to analyze any specific match.")
+            else:
+                text = ("🎾 ТЕННИС\n• Расписание: atptour.com, flashscore.com\n\n"
+                        "🎮 CS2\n• Расписание: hltv.org/matches\n\n"
+                        "⚔️ DOTA 2\n• Расписание: liquipedia.net\n\n"
+                        "Для анализа конкретного матча:\n"
+                        "/analyze Игрок1 vs Игрок2\n"
+                        "/cs2 Команда1 vs Команда2\n"
+                        "/dota2 Команда1 vs Команда2")
 
         await wait_msg.delete()
 
