@@ -404,7 +404,7 @@ def generate_pdf(data: dict) -> str:
 
 
 def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
-    """Generate a PDF with today's match schedule."""
+    """Generate a clean PDF with today's match schedule."""
     os.makedirs(PDF_DIR, exist_ok=True)
     fpath = os.path.join(PDF_DIR, f"schedule_{date_str.replace(' ', '_')}.pdf")
 
@@ -413,67 +413,105 @@ def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
 
     # ═══ Header ═══
     y = H - 15 * mm
-    h = 16 * mm
+    h = 18 * mm
     c.setFillColor(NAVY)
     c.rect(LM, y - h, CW, h, fill=1, stroke=0)
     c.setFillColor(WHITE)
-    c.setFont(DJSB, 12)
-    title = f"TODAY'S MATCHES | {date_str}" if lang == "en" else f"МАТЧИ СЕГОДНЯ | {date_str}"
-    c.drawString(TLM, y - 6 * mm, title)
+    c.setFont(DJSB, 13)
+    title = f"TODAY'S MATCHES | {date_str}" if lang == "en" else f"РАСПИСАНИЕ МАТЧЕЙ | {date_str}"
+    c.drawString(TLM, y - 7 * mm, title)
     c.setFont(DJS, 8)
-    subtitle = "Tennis | CS2 | Dota 2" if lang == "en" else "Теннис | CS2 | Dota 2"
-    c.drawString(TLM, y - 12 * mm, subtitle)
-    y -= h + 5 * mm
+    c.drawString(TLM, y - 13 * mm, "Tennis | CS2 | Dota 2")
+    y -= h + 4 * mm
 
-    # ═══ Body — render text line by line ═══
-    c.setFont(DJS, 7)
-    c.setFillColor(BLACK)
-
+    # ═══ Body ═══
     lines = text.split('\n')
+    row_idx = 0
+
     for line in lines:
         line = line.strip()
         if not line:
-            y -= 3 * mm
-            continue
-
-        # Detect section headers (lines with ### or ALL CAPS or emoji headers)
-        is_header = (line.startswith('#') or line.startswith('🎾') or
-                     line.startswith('🎮') or line.startswith('⚔️') or
-                     line.startswith('1.') or line.startswith('2.') or line.startswith('3.') or
-                     line.isupper())
-
-        if is_header:
-            clean = line.lstrip('#').strip()
             y -= 2 * mm
-            bar_h = 5 * mm
-            c.setFillColor(BLUE)
-            c.rect(LM, y - bar_h, CW, bar_h, fill=1, stroke=0)
-            c.setFillColor(WHITE)
-            c.setFont(DJSB, 7.5)
-            c.drawString(TLM, y - bar_h + 1.5 * mm, clean[:80])
-            y -= bar_h + 2 * mm
-            c.setFont(DJS, 7)
-            c.setFillColor(BLACK)
-        else:
-            # Regular line — wrap if needed
-            wrapped = _wrap(c, line, DJS, 7, mw)
-            for wl in wrapped:
-                if y < 25 * mm:
-                    _footer(c)
-                    c.showPage()
-                    y = H - 15 * mm
-                    c.setFont(DJS, 7)
-                    c.setFillColor(BLACK)
-                y -= 3 * mm
-                c.drawString(TLM, y, wl)
+            continue
 
         # Page break check
         if y < 25 * mm:
             _footer(c)
             c.showPage()
             y = H - 15 * mm
-            c.setFont(DJS, 7)
+            row_idx = 0
+
+        # Section headers (emoji or caps)
+        is_section = any(line.startswith(e) for e in ['🎾', '🎮', '⚔️', 'TENNIS', 'CS2', 'DOTA', 'ТЕННИС'])
+        if is_section or (line.isupper() and len(line) < 40):
+            clean = line.replace('🎾', '').replace('🎮', '').replace('⚔️', '').strip()
+            # Pick color by sport
+            if any(k in line.upper() for k in ['TENNIS', 'ТЕННИС', '🎾']):
+                bar_color = GREEN
+            elif any(k in line.upper() for k in ['CS2', 'CS', '🎮']):
+                bar_color = HexColor('#E67E22')
+            elif any(k in line.upper() for k in ['DOTA', '⚔️']):
+                bar_color = RED
+            else:
+                bar_color = BLUE
+
+            y -= 3 * mm
+            bar_h = 6 * mm
+            c.setFillColor(bar_color)
+            c.rect(LM, y - bar_h, CW, bar_h, fill=1, stroke=0)
+            c.setFillColor(WHITE)
+            c.setFont(DJSB, 8)
+            c.drawString(TLM, y - bar_h + 1.8 * mm, clean[:70])
+            y -= bar_h + 2 * mm
+            row_idx = 0
+            continue
+
+        # Match lines (• or - or numbered)
+        is_match = line.startswith('•') or line.startswith('-') or (len(line) > 2 and line[0].isdigit() and line[1] in '.)')
+        if is_match:
+            clean = line.lstrip('•-0123456789.) ').strip()
+
+            # Alternating row background
+            rh = 4.5 * mm
+            bg = LGRAY if row_idx % 2 == 0 else WHITE
+            c.setFillColor(bg)
+            c.rect(LM, y - rh, CW, rh, fill=1, stroke=0)
+
+            # Try to split time and match
             c.setFillColor(BLACK)
+            if '—' in clean:
+                parts = clean.split('—', 1)
+                time_str = parts[0].strip()
+                match_str = parts[1].strip()
+                # Time in bold
+                c.setFont(DJSB, 7)
+                c.drawString(TLM, y - rh + 1.2 * mm, time_str)
+                # Match info
+                c.setFont(DJS, 7)
+                c.drawString(TLM + 18 * mm, y - rh + 1.2 * mm, match_str[:95])
+            else:
+                c.setFont(DJS, 7)
+                c.drawString(TLM, y - rh + 1.2 * mm, clean[:110])
+
+            y -= rh
+            row_idx += 1
+            continue
+
+        # Other text (notes, explanations)
+        if any(k in line.lower() for k in ['правил', 'rules', 'важно', 'important', 'никаких', 'нет матчей', 'no matches']):
+            continue  # Skip instruction artifacts
+
+        # Fallback: regular text
+        c.setFont(DJS, 6.5)
+        c.setFillColor(GRAY)
+        for wl in _wrap(c, line, DJS, 6.5, mw):
+            if y < 25 * mm:
+                _footer(c)
+                c.showPage()
+                y = H - 15 * mm
+            y -= 3 * mm
+            c.drawString(TLM, y, wl)
+        c.setFillColor(BLACK)
 
     # ═══ Footer note ═══
     y -= 8 * mm
