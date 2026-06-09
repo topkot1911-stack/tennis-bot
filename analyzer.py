@@ -214,7 +214,10 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
         i += 1
 
     if data is None:
-        raise ValueError(f"Could not extract JSON from Claude response ({len(text)} chars)")
+        # Fallback: return raw text as a simple dict
+        return {"_raw_text": text, "probability": 0.5, "bo": 5,
+                "player1": {"name": "?", "name_en": "Player1"}, "player2": {"name": "?", "name_en": "Player2"},
+                "favorite": 1, "distribution": bo5_distribution(0.5)}
 
     # Enrich with mathematical model
     p = data.get("probability", 0.5)
@@ -230,6 +233,13 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
 
 def format_summary(data: dict) -> str:
     """Format analysis data into a Telegram message (with HTML formatting)."""
+    # Fallback: if JSON parsing failed, return raw Claude text
+    if "_raw_text" in data:
+        raw = data["_raw_text"]
+        if len(raw) > 3900:
+            raw = raw[:3897] + "..."
+        return f"🎾 <b>Анализ матча</b>\n\n{raw}\n\n<i>⚠️ Исследовательский анализ</i>"
+
     p = data.get("probability", 0.5)
     bo = data.get("bo", 5)
     dist = data.get("distribution", {})
@@ -411,7 +421,9 @@ async def analyze_cs2(query: str, lang_suffix: str = "") -> dict:
         i += 1
 
     if data is None:
-        raise ValueError(f"Could not extract JSON from CS2 response ({len(text)} chars)")
+        return {"_raw_text": text, "probability": 0.5, "format": "Bo3",
+                "team1": {"name": "?", "short": "T1"}, "team2": {"name": "?", "short": "T2"},
+                "favorite": 1, "distribution": bo3_distribution(0.5)}
 
     p = data.get("probability", 0.5)
     fmt = data.get("format", "Bo3")
@@ -427,6 +439,10 @@ async def analyze_cs2(query: str, lang_suffix: str = "") -> dict:
 
 def format_cs2_summary(data: dict) -> str:
     """Format CS2 analysis for Telegram."""
+    if "_raw_text" in data:
+        raw = data["_raw_text"]
+        if len(raw) > 3900: raw = raw[:3897] + "..."
+        return f"🎮 <b>CS2 Analysis</b>\n\n{raw}\n\n<i>⚠️ Research analysis</i>"
     p = data.get("probability", 0.5)
     fav_idx = data.get("favorite", 1)
     t1 = data.get("team1", {})
@@ -544,7 +560,9 @@ async def analyze_dota2(query: str, lang_suffix: str = "") -> dict:
                         break
         i += 1
     if data is None:
-        raise ValueError(f"Could not extract JSON ({len(text)} chars)")
+        return {"_raw_text": text, "probability": 0.5, "format": "Bo3",
+                "team1": {"name": "?", "short": "T1"}, "team2": {"name": "?", "short": "T2"},
+                "favorite": 1, "distribution": bo3_distribution(0.5)}
     p = data.get("probability", 0.5); fmt = data.get("format", "Bo3")
     if fmt == "Bo5": data["distribution"] = bo5_distribution(p)
     elif fmt in ("Bo1","Bo2"): data["distribution"] = {"p_win": p}
@@ -554,6 +572,10 @@ async def analyze_dota2(query: str, lang_suffix: str = "") -> dict:
 
 def format_dota2_summary(data: dict) -> str:
     """Format Dota 2 analysis for Telegram."""
+    if "_raw_text" in data:
+        raw = data["_raw_text"]
+        if len(raw) > 3900: raw = raw[:3897] + "..."
+        return f"⚔️ <b>Dota 2 Analysis</b>\n\n{raw}\n\n<i>⚠️ Research analysis</i>"
     p = data.get("probability", 0.5)
     fav_idx = data.get("favorite", 1)
     t1 = data.get("team1", {}); t2 = data.get("team2", {})

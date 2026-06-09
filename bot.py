@@ -267,27 +267,24 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Generate summary text
         summary = format_summary(data)
 
-        # Generate PDF
-        await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-        pdf_path = generate_pdf(data)
-
         # Send summary
         await wait_msg.delete()
         await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
 
-        # Send PDF
-        with open(pdf_path, "rb") as pdf_file:
-            fav = data.get("player1", {}) if data.get("favorite", 1) == 1 else data.get("player2", {})
-            dog = data.get("player2", {}) if data.get("favorite", 1) == 1 else data.get("player1", {})
-            caption = (
-                f"📄 Полный отчёт: {fav.get('name', '')} vs {dog.get('name', '')}\n"
-                f"🏆 {fav.get('name', '')} {round(data.get('probability', 0.5) * 100)}%"
-            )
-            await update.message.reply_document(
-                document=pdf_file,
-                filename=os.path.basename(pdf_path),
-                caption=caption,
-            )
+        # Generate and send PDF (skip if raw text fallback)
+        if "_raw_text" not in data:
+            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            pdf_path = generate_pdf(data)
+            with open(pdf_path, "rb") as pdf_file:
+                fav = data.get("player1", {}) if data.get("favorite", 1) == 1 else data.get("player2", {})
+                dog = data.get("player2", {}) if data.get("favorite", 1) == 1 else data.get("player1", {})
+                caption = (
+                    f"📄 {fav.get('name', '')} vs {dog.get('name', '')}\n"
+                    f"🏆 {fav.get('name', '')} {round(data.get('probability', 0.5) * 100)}%"
+                )
+                await update.message.reply_document(
+                    document=pdf_file, filename=os.path.basename(pdf_path), caption=caption,
+                )
 
         # Cleanup
         try:
@@ -636,23 +633,21 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        # Generate PDF
-        await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-        pdf_path = generate_pdf(data)
-
         await wait_msg.delete()
         await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
 
-        # Send PDF
-        with open(pdf_path, "rb") as pdf_file:
-            t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
-            t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
-            await update.message.reply_document(
-                document=pdf_file, filename=os.path.basename(pdf_path),
-                caption=f"🎮 CS2 | {t1n} vs {t2n}",
-            )
-        try: os.remove(pdf_path)
-        except OSError: pass
+        if "_raw_text" not in data:
+            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            pdf_path = generate_pdf(data)
+            with open(pdf_path, "rb") as pdf_file:
+                t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+                t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+                await update.message.reply_document(
+                    document=pdf_file, filename=os.path.basename(pdf_path),
+                    caption=f"🎮 CS2 | {t1n} vs {t2n}",
+                )
+            try: os.remove(pdf_path)
+            except OSError: pass
 
     except Exception as e:
         logger.error(f"CS2 analysis error: {e}\n{traceback.format_exc()}")
@@ -706,20 +701,20 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob=data.get("probability",0.5), fav=favd.get("name","?"),
                 tournament=data.get("tournament","Dota2"), confidence=data.get("confidence","?"))
         except Exception: pass
-        # Generate PDF
-        await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-        pdf_path = generate_pdf(data)
         await wait_msg.delete()
         await update.message.reply_text(summary, parse_mode=ParseMode.HTML)
-        with open(pdf_path, "rb") as pdf_file:
-            t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
-            t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
-            await update.message.reply_document(
-                document=pdf_file, filename=os.path.basename(pdf_path),
-                caption=f"⚔️ Dota 2 | {t1n} vs {t2n}",
-            )
-        try: os.remove(pdf_path)
-        except OSError: pass
+        if "_raw_text" not in data:
+            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            pdf_path = generate_pdf(data)
+            with open(pdf_path, "rb") as pdf_file:
+                t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+                t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+                await update.message.reply_document(
+                    document=pdf_file, filename=os.path.basename(pdf_path),
+                    caption=f"⚔️ Dota 2 | {t1n} vs {t2n}",
+                )
+            try: os.remove(pdf_path)
+            except OSError: pass
     except Exception as e:
         logger.error(f"Dota2 error: {e}\n{traceback.format_exc()}")
         try: await wait_msg.delete()
