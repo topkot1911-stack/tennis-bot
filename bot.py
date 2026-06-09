@@ -1061,7 +1061,6 @@ async def post_init(app: Application):
     commands = [
         BotCommand("analyze", "📊 Полный анализ + PDF"),
         BotCommand("quick", "⚡ Быстрый анализ"),
-        BotCommand("today", "📅 Матчи сегодня"),
         BotCommand("results", "📋 Проверка прогнозов"),
         BotCommand("follow", "⭐ Избранные игроки"),
         BotCommand("cs2", "🎮 CS2 анализ"),
@@ -1103,7 +1102,6 @@ def main():
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("quick", cmd_quick))
-    app.add_handler(CommandHandler("today", cmd_today))
     app.add_handler(CommandHandler("mystats", cmd_mystats))
     app.add_handler(CommandHandler("vip", cmd_vip))
     app.add_handler(CommandHandler("lang", cmd_lang))
