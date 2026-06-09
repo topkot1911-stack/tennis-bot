@@ -375,33 +375,53 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if lang == "en":
             prompt = (
-                f"Today is {today}. Search the web and find ALL notable matches happening TODAY across:\n\n"
-                "1. TENNIS — ATP/WTA tournaments (Grand Slams, Masters, 500/250)\n"
-                "2. CS2 — any ongoing tournaments (ESL, BLAST, PGL, IEM etc.)\n"
-                "3. DOTA 2 — any ongoing tournaments (DPC, ESL, BetBoom etc.)\n\n"
-                "For each match list: teams/players, tournament, round/stage, time if available.\n"
-                "Group by sport. If no matches found for a sport — write 'No matches today'.\n"
-                "At the end add:\n"
-                "'For analysis: /analyze Player1 vs Player2 (tennis) | /cs2 Team1 vs Team2 | /dota2 Team1 vs Team2'\n"
-                "Respond in English. NOT JSON — plain structured text."
+                f"Today is {today}. I need a SPECIFIC LIST of ALL matches happening TODAY.\n\n"
+                "Search these sites:\n"
+                "- flashscore.com or sofascore.com for today's tennis matches\n"
+                "- hltv.org/matches for today's CS2 matches\n"
+                "- liquipedia.net for today's Dota 2 matches\n\n"
+                "FORMAT YOUR RESPONSE EXACTLY LIKE THIS:\n\n"
+                "TENNIS:\n"
+                "1. Player A vs Player B — Tournament, Round, Time\n"
+                "2. Player C vs Player D — Tournament, Round, Time\n"
+                "(list ALL matches you find)\n\n"
+                "CS2:\n"
+                "1. Team A vs Team B — Tournament, Stage, Bo3, Time\n"
+                "(list ALL matches)\n\n"
+                "DOTA 2:\n"
+                "1. Team A vs Team B — Tournament, Stage, Bo3, Time\n"
+                "(list ALL matches)\n\n"
+                "IMPORTANT: I need SPECIFIC match pairs (Player1 vs Player2), NOT general tournament info.\n"
+                "If you cannot find specific matches for a sport, write 'No matches found'.\n"
+                "At the end: 'For analysis: /analyze Player1 vs Player2 | /cs2 Team1 vs Team2 | /dota2 Team1 vs Team2'"
             )
         else:
             prompt = (
-                f"Сегодня {today}. Найди через веб-поиск ВСЕ значимые матчи СЕГОДНЯ по трём дисциплинам:\n\n"
-                "1. ТЕННИС — ATP/WTA турниры (Grand Slam, Masters, 500/250)\n"
-                "2. CS2 — текущие турниры (ESL, BLAST, PGL, IEM и т.д.)\n"
-                "3. DOTA 2 — текущие турниры (DPC, ESL, BetBoom и т.д.)\n\n"
-                "Для каждого матча укажи: команды/игроки, турнир, стадия, время.\n"
-                "Группируй по виду спорта. Если матчей нет — напиши 'Нет матчей сегодня'.\n"
-                "В конце добавь:\n"
-                "'Для анализа: /analyze Игрок1 vs Игрок2 (теннис) | /cs2 Команда1 vs Команда2 | /dota2 Команда1 vs Команда2'\n"
-                "Ответ на русском. НЕ JSON — структурированный текст."
+                f"Сегодня {today}. Мне нужен КОНКРЕТНЫЙ СПИСОК ВСЕХ матчей на сегодня.\n\n"
+                "Поищи на этих сайтах:\n"
+                "- flashscore.com или sofascore.com — теннисные матчи сегодня\n"
+                "- hltv.org/matches — матчи CS2 сегодня\n"
+                "- liquipedia.net — матчи Dota 2 сегодня\n\n"
+                "ОФОРМИ ОТВЕТ СТРОГО ТАК:\n\n"
+                "ТЕННИС:\n"
+                "1. Игрок А vs Игрок Б — Турнир, Раунд, Время\n"
+                "2. Игрок В vs Игрок Г — Турнир, Раунд, Время\n"
+                "(перечисли ВСЕ найденные матчи)\n\n"
+                "CS2:\n"
+                "1. Команда А vs Команда Б — Турнир, Стадия, Bo3, Время\n"
+                "(перечисли ВСЕ матчи)\n\n"
+                "DOTA 2:\n"
+                "1. Команда А vs Команда Б — Турнир, Стадия, Bo3, Время\n"
+                "(перечисли ВСЕ матчи)\n\n"
+                "ВАЖНО: Мне нужны КОНКРЕТНЫЕ ПАРЫ (Игрок1 vs Игрок2), а НЕ общая информация о турнирах.\n"
+                "Если матчей нет — напиши 'Матчей не найдено'.\n"
+                "В конце: 'Для анализа: /analyze Игрок1 vs Игрок2 | /cs2 Команда1 vs Команда2 | /dota2 Команда1 vs Команда2'"
             )
 
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=6000,
-            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            max_tokens=8000,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 8}],
             messages=[{"role": "user", "content": prompt}],
         )
 
