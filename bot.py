@@ -360,34 +360,52 @@ async def cmd_quick(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /today — fetch today's tennis schedule via web search."""
-    from datetime import date
+    """Handle /today — fetch today's matches: tennis + CS2 + Dota 2."""
+    from datetime import date as dt
     import anthropic
     from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
+    user_id = update.effective_user.id
+    lang = db.get_language(user_id)
+
     await update.message.reply_chat_action(ChatAction.TYPING)
-    wait_msg = await update.message.reply_text("📅 Ищу расписание матчей на сегодня...")
+    wait_text = "📅 Searching for today's matches..." if lang == "en" else "📅 Ищу матчи на сегодня (теннис + CS2 + Dota 2)..."
+    wait_msg = await update.message.reply_text(wait_text)
 
     try:
-        today = date.today().strftime("%d %B %Y")
+        today = dt.today().strftime("%d %B %Y")
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+        if lang == "en":
+            prompt = (
+                f"Today is {today}. Search the web and find ALL notable matches happening TODAY across:\n\n"
+                "1. TENNIS — ATP/WTA tournaments (Grand Slams, Masters, 500/250)\n"
+                "2. CS2 — any ongoing tournaments (ESL, BLAST, PGL, IEM etc.)\n"
+                "3. DOTA 2 — any ongoing tournaments (DPC, ESL, BetBoom etc.)\n\n"
+                "For each match list: teams/players, tournament, round/stage, time if available.\n"
+                "Group by sport. If no matches found for a sport — write 'No matches today'.\n"
+                "At the end add:\n"
+                "'For analysis: /analyze Player1 vs Player2 (tennis) | /cs2 Team1 vs Team2 | /dota2 Team1 vs Team2'\n"
+                "Respond in English. NOT JSON — plain structured text."
+            )
+        else:
+            prompt = (
+                f"Сегодня {today}. Найди через веб-поиск ВСЕ значимые матчи СЕГОДНЯ по трём дисциплинам:\n\n"
+                "1. ТЕННИС — ATP/WTA турниры (Grand Slam, Masters, 500/250)\n"
+                "2. CS2 — текущие турниры (ESL, BLAST, PGL, IEM и т.д.)\n"
+                "3. DOTA 2 — текущие турниры (DPC, ESL, BetBoom и т.д.)\n\n"
+                "Для каждого матча укажи: команды/игроки, турнир, стадия, время.\n"
+                "Группируй по виду спорта. Если матчей нет — напиши 'Нет матчей сегодня'.\n"
+                "В конце добавь:\n"
+                "'Для анализа: /analyze Игрок1 vs Игрок2 (теннис) | /cs2 Команда1 vs Команда2 | /dota2 Команда1 vs Команда2'\n"
+                "Ответ на русском. НЕ JSON — структурированный текст."
+            )
 
         response = client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=4000,
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search",
-                "max_uses": 3,
-            }],
-            messages=[{"role": "user", "content":
-                f"Сегодня {today}. Найди через веб-поиск ВСЕ мужские и женские теннисные матчи, "
-                "которые играются СЕГОДНЯ на крупных турнирах (Grand Slam, Masters, ATP/WTA). "
-                "Для каждого матча укажи: игроки, турнир, раунд, корт, время. "
-                "Ответ на русском языке, в виде структурированного текста (НЕ JSON). "
-                "Если турнир один — перечисли все матчи по кортам. "
-                "В конце добавь: 'Для анализа любого матча: /analyze Игрок1 vs Игрок2'."
-            }],
+            max_tokens=6000,
+            tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+            messages=[{"role": "user", "content": prompt}],
         )
 
         text = ""
@@ -396,21 +414,39 @@ async def cmd_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text += block.text
 
         if not text.strip():
-            text = "Не удалось найти расписание. Попробуйте позже."
+            text = "No matches found." if lang == "en" else "Не удалось найти расписание."
 
         await wait_msg.delete()
-        # Split long messages (Telegram limit 4096 chars)
-        if len(text) > 4000:
-            text = text[:3997] + "..."
-        await update.message.reply_text(f"📅 <b>Матчи сегодня ({today})</b>\n\n{text}",
-                                         parse_mode=ParseMode.HTML)
+
+        header = f"📅 <b>Today's matches ({today})</b>" if lang == "en" else f"📅 <b>Матчи сегодня ({today})</b>"
+
+        # Split into chunks if too long for Telegram
+        full_text = f"{header}\n\n{text}"
+        if len(full_text) > 4000:
+            full_text = full_text[:3997] + "..."
+
+        await update.message.reply_text(full_text, parse_mode=ParseMode.HTML)
+
+        # Generate PDF with today's schedule
+        try:
+            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+            from pdf_generator import generate_today_pdf
+            pdf_path = generate_today_pdf(text, today, lang)
+            with open(pdf_path, "rb") as f:
+                cap = f"📅 Schedule {today}" if lang == "en" else f"📅 Расписание {today}"
+                await update.message.reply_document(document=f, filename=os.path.basename(pdf_path), caption=cap)
+            try: os.remove(pdf_path)
+            except OSError: pass
+        except Exception as pdf_err:
+            logger.error(f"Today PDF error: {pdf_err}")
+
     except Exception as e:
         logger.error(f"Today error: {e}")
         try:
             await wait_msg.delete()
         except Exception:
             pass
-        await update.message.reply_text(f"❌ Ошибка: {str(e)[:200]}")
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
 async def cmd_mystats(update: Update, context: ContextTypes.DEFAULT_TYPE):

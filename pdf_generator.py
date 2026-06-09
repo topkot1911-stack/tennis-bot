@@ -401,3 +401,92 @@ def generate_pdf(data: dict) -> str:
     c.save()
 
     return fpath
+
+
+def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
+    """Generate a PDF with today's match schedule."""
+    os.makedirs(PDF_DIR, exist_ok=True)
+    fpath = os.path.join(PDF_DIR, f"schedule_{date_str.replace(' ', '_')}.pdf")
+
+    c = canvas.Canvas(fpath, pagesize=A4)
+    mw = CW - 6 * mm
+
+    # ═══ Header ═══
+    y = H - 15 * mm
+    h = 16 * mm
+    c.setFillColor(NAVY)
+    c.rect(LM, y - h, CW, h, fill=1, stroke=0)
+    c.setFillColor(WHITE)
+    c.setFont(DJSB, 12)
+    title = f"TODAY'S MATCHES | {date_str}" if lang == "en" else f"МАТЧИ СЕГОДНЯ | {date_str}"
+    c.drawString(TLM, y - 6 * mm, title)
+    c.setFont(DJS, 8)
+    subtitle = "Tennis | CS2 | Dota 2" if lang == "en" else "Теннис | CS2 | Dota 2"
+    c.drawString(TLM, y - 12 * mm, subtitle)
+    y -= h + 5 * mm
+
+    # ═══ Body — render text line by line ═══
+    c.setFont(DJS, 7)
+    c.setFillColor(BLACK)
+
+    lines = text.split('\n')
+    for line in lines:
+        line = line.strip()
+        if not line:
+            y -= 3 * mm
+            continue
+
+        # Detect section headers (lines with ### or ALL CAPS or emoji headers)
+        is_header = (line.startswith('#') or line.startswith('🎾') or
+                     line.startswith('🎮') or line.startswith('⚔️') or
+                     line.startswith('1.') or line.startswith('2.') or line.startswith('3.') or
+                     line.isupper())
+
+        if is_header:
+            clean = line.lstrip('#').strip()
+            y -= 2 * mm
+            bar_h = 5 * mm
+            c.setFillColor(BLUE)
+            c.rect(LM, y - bar_h, CW, bar_h, fill=1, stroke=0)
+            c.setFillColor(WHITE)
+            c.setFont(DJSB, 7.5)
+            c.drawString(TLM, y - bar_h + 1.5 * mm, clean[:80])
+            y -= bar_h + 2 * mm
+            c.setFont(DJS, 7)
+            c.setFillColor(BLACK)
+        else:
+            # Regular line — wrap if needed
+            wrapped = _wrap(c, line, DJS, 7, mw)
+            for wl in wrapped:
+                if y < 25 * mm:
+                    _footer(c)
+                    c.showPage()
+                    y = H - 15 * mm
+                    c.setFont(DJS, 7)
+                    c.setFillColor(BLACK)
+                y -= 3 * mm
+                c.drawString(TLM, y, wl)
+
+        # Page break check
+        if y < 25 * mm:
+            _footer(c)
+            c.showPage()
+            y = H - 15 * mm
+            c.setFont(DJS, 7)
+            c.setFillColor(BLACK)
+
+    # ═══ Footer note ═══
+    y -= 8 * mm
+    if lang == "en":
+        note = "For analysis: /analyze (tennis) | /cs2 (CS2) | /dota2 (Dota 2)"
+    else:
+        note = "Для анализа: /analyze (теннис) | /cs2 (CS2) | /dota2 (Dota 2)"
+    c.setFont(DJSB, 7)
+    c.setFillColor(BLUE)
+    c.drawString(TLM, y, note)
+
+    _footer(c)
+    c.showPage()
+    c.save()
+
+    return fpath
