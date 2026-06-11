@@ -723,17 +723,20 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_reply(update.message, summary)
 
         if "_raw_text" not in data:
-            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-            pdf_path = generate_pdf(data)
-            with open(pdf_path, "rb") as pdf_file:
-                t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
-                t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
-                await update.message.reply_document(
-                    document=pdf_file, filename=os.path.basename(pdf_path),
-                    caption=f"🎮 CS2 | {t1n} vs {t2n}",
-                )
-            try: os.remove(pdf_path)
-            except OSError: pass
+            try:
+                await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+                pdf_path = generate_pdf(data)
+                with open(pdf_path, "rb") as pdf_file:
+                    t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+                    t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+                    await update.message.reply_document(
+                        document=pdf_file, filename=os.path.basename(pdf_path),
+                        caption=f"🎮 CS2 | {t1n} vs {t2n}",
+                    )
+                try: os.remove(pdf_path)
+                except OSError: pass
+            except Exception as pdf_err:
+                logger.error(f"CS2 PDF error: {pdf_err}")
 
     except Exception as e:
         logger.error(f"CS2 analysis error: {e}\n{traceback.format_exc()}")
@@ -790,17 +793,20 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait_msg.delete()
         await _safe_reply(update.message, summary)
         if "_raw_text" not in data:
-            await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-            pdf_path = generate_pdf(data)
-            with open(pdf_path, "rb") as pdf_file:
-                t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
-                t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
-                await update.message.reply_document(
-                    document=pdf_file, filename=os.path.basename(pdf_path),
-                    caption=f"⚔️ Dota 2 | {t1n} vs {t2n}",
-                )
-            try: os.remove(pdf_path)
-            except OSError: pass
+            try:
+                await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
+                pdf_path = generate_pdf(data)
+                with open(pdf_path, "rb") as pdf_file:
+                    t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
+                    t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
+                    await update.message.reply_document(
+                        document=pdf_file, filename=os.path.basename(pdf_path),
+                        caption=f"⚔️ Dota 2 | {t1n} vs {t2n}",
+                    )
+                try: os.remove(pdf_path)
+                except OSError: pass
+            except Exception as pdf_err:
+                logger.error(f"Dota2 PDF error: {pdf_err}")
     except Exception as e:
         logger.error(f"Dota2 error: {e}\n{traceback.format_exc()}")
         try: await wait_msg.delete()
