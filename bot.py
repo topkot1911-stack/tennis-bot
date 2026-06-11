@@ -321,12 +321,6 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as pdf_err:
                 logger.error(f"PDF generation error: {pdf_err}")
 
-        # Cleanup
-        try:
-            os.remove(pdf_path)
-        except OSError:
-            pass
-
     except Exception as e:
         logger.error(f"Analysis error: {e}\n{traceback.format_exc()}")
         error_text = (
