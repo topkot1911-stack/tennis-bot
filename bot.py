@@ -36,7 +36,7 @@ from datetime import date
 
 from config import TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, PDF_DIR
 from analyzer import analyze_match, format_summary, analyze_cs2, format_cs2_summary, analyze_dota2, format_dota2_summary
-from pdf_generator import generate_pdf
+from pdf_generator import generate_pdf, generate_esports_pdf
 import database as db
 
 # Logging
@@ -725,7 +725,7 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "_raw_text" not in data:
             try:
                 await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-                pdf_path = generate_pdf(data)
+                pdf_path = generate_esports_pdf(data, sport="cs2")
                 with open(pdf_path, "rb") as pdf_file:
                     t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
                     t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
@@ -736,7 +736,7 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: os.remove(pdf_path)
                 except OSError: pass
             except Exception as pdf_err:
-                logger.error(f"CS2 PDF error: {pdf_err}")
+                logger.error(f"CS2 PDF error: {pdf_err}\n{traceback.format_exc()}")
 
     except Exception as e:
         logger.error(f"CS2 analysis error: {e}\n{traceback.format_exc()}")
@@ -795,7 +795,7 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if "_raw_text" not in data:
             try:
                 await update.message.reply_chat_action(ChatAction.UPLOAD_DOCUMENT)
-                pdf_path = generate_pdf(data)
+                pdf_path = generate_esports_pdf(data, sport="dota2")
                 with open(pdf_path, "rb") as pdf_file:
                     t1n = data.get("team1", {}).get("short", data.get("team1", {}).get("name", "T1"))
                     t2n = data.get("team2", {}).get("short", data.get("team2", {}).get("name", "T2"))
@@ -806,7 +806,7 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try: os.remove(pdf_path)
                 except OSError: pass
             except Exception as pdf_err:
-                logger.error(f"Dota2 PDF error: {pdf_err}")
+                logger.error(f"Dota2 PDF error: {pdf_err}\n{traceback.format_exc()}")
     except Exception as e:
         logger.error(f"Dota2 error: {e}\n{traceback.format_exc()}")
         try: await wait_msg.delete()

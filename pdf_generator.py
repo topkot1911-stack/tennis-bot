@@ -408,6 +408,321 @@ def generate_pdf(data: dict) -> str:
     return fpath
 
 
+def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
+    """
+    Generate a 2-page PDF report for CS2 / Dota 2 analysis.
+    `data` has team1/team2 shape (name, short, hltv_rank/liquipedia_rank, etc).
+    Returns the file path of the generated PDF.
+    """
+    os.makedirs(PDF_DIR, exist_ok=True)
+
+    sport = (sport or "cs2").lower()
+    is_dota = sport.startswith("dota")
+    sport_label = "Dota 2" if is_dota else "CS2"
+    sport_emoji = "⚔️" if is_dota else "🎮"
+    accent = RED if is_dota else HexColor('#E67E22')
+    rank_key = "liquipedia_rank" if is_dota else "hltv_rank"
+    rank_label = "Liquipedia" if is_dota else "HLTV"
+
+    t1 = data.get("team1", {}) or {}
+    t2 = data.get("team2", {}) or {}
+    if not isinstance(t1, dict): t1 = {"name": str(t1)}
+    if not isinstance(t2, dict): t2 = {"name": str(t2)}
+
+    p = float(data.get("probability", 0.5) or 0.5)
+    fmt = str(data.get("format", "Bo3"))
+    fav_idx = data.get("favorite", 1)
+    fav = t1 if fav_idx == 1 else t2
+    dog = t2 if fav_idx == 1 else t1
+    dist = data.get("distribution", {}) or {}
+    mw = CW - 6 * mm
+
+    def _safe_name(d, default):
+        n = d.get("name") or d.get("short") or default
+        return str(n)
+
+    fav_name = _safe_name(fav, "Team1")
+    dog_name = _safe_name(dog, "Team2")
+    t1_name = _safe_name(t1, "Team1")
+    t2_name = _safe_name(t2, "Team2")
+    fav_short = str(fav.get("short") or fav_name)
+    dog_short = str(dog.get("short") or dog_name)
+
+    fn_en = fav_name.replace(" ", "_").replace(".", "")
+    dn_en = dog_name.replace(" ", "_").replace(".", "")
+    prefix = "Dota2" if is_dota else "CS2"
+    fname = f"{prefix}_{fn_en}_vs_{dn_en}.pdf"
+    fpath = os.path.join(PDF_DIR, fname)
+
+    c = canvas.Canvas(fpath, pagesize=A4)
+
+    # ═══════════ PAGE 1 ═══════════
+    y = H - 15 * mm
+
+    # Header
+    h = 16 * mm
+    c.setFillColor(NAVY)
+    c.rect(LM, y - h, CW, h, fill=1, stroke=0)
+    c.setFillColor(WHITE)
+    c.setFont(DJSB, 10)
+    tour = str(data.get("tournament", sport_label))
+    stage = str(data.get("stage", "") or data.get("round", ""))
+    c.drawString(TLM, y - 6 * mm, f"{sport_emoji} {sport_label} | {tour} | {stage}")
+    c.setFont(DJS, 7.5)
+    c.drawString(TLM, y - 12 * mm,
+                 f"{data.get('date', '')} | Format: {fmt}")
+    y -= h + 3 * mm
+
+    # VS block
+    mid = W / 2
+    c.setFillColor(NAVY)
+    c.setFont(DJSB, 13)
+    c.drawRightString(mid - 8 * mm, y, f"{t1_name} [{t1.get('short', '')}]")
+    c.setFillColor(GOLD)
+    c.setFont(DJSB, 14)
+    c.drawCentredString(mid, y, "VS")
+    c.setFillColor(NAVY)
+    c.setFont(DJSB, 13)
+    c.drawString(mid + 8 * mm, y, f"{t2_name} [{t2.get('short', '')}]")
+    y -= 5 * mm
+
+    c.setFont(DJS, 8)
+    c.setFillColor(GRAY)
+    c.drawRightString(mid - 8 * mm, y, f"{rank_label} #{t1.get(rank_key, '?')}")
+    c.drawString(mid + 8 * mm, y, f"{rank_label} #{t2.get(rank_key, '?')}")
+    y -= 7 * mm
+
+    # Profiles (if present)
+    for team, name in [(t1, t1_name), (t2, t2_name)]:
+        profile = team.get("profile", [])
+        if isinstance(profile, str):
+            profile = [profile]
+        elif not isinstance(profile, list):
+            profile = [str(profile)] if profile else []
+        if not profile:
+            continue
+        y = _sbar(c, f"ПРОФИЛЬ: {str(name).upper()}", y, gap=2 * mm)
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        for line in profile[:5]:
+            y -= 3 * mm
+            c.drawString(TLM, y, str(line)[:125])
+        y -= 1 * mm
+
+    # Player status
+    ps = data.get("player_status", {}) or {}
+    if isinstance(ps, dict) and (ps.get("team1") or ps.get("team2")):
+        y = _sbar(c, "СОСТОЯНИЕ ИГРОКОВ / РОСТЕР", y, gap=2 * mm)
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        for key, label in [("team1", t1_name), ("team2", t2_name)]:
+            v = ps.get(key)
+            if not v:
+                continue
+            y -= 3 * mm
+            c.drawString(TLM, y, f"{str(label)[:18]}: {str(v)[:105]}")
+        y -= 1 * mm
+
+    # H2H
+    h2h = data.get("h2h", "")
+    if h2h:
+        y = _sbar(c, "H2H", y, gap=2 * mm)
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        y -= 3 * mm
+        c.drawString(TLM, y, str(h2h)[:125])
+        y -= 1 * mm
+
+    # Factors
+    factors = data.get("factors", []) or []
+    if isinstance(factors, list) and factors:
+        y = _sbar(c, f"ФАКТОРНАЯ КОРРЕКТИРОВКА ({len(factors)} ФАКТОРОВ)", y, gap=2 * mm)
+        rh = 3.6 * mm
+        c.setFillColor(LBLUE)
+        c.rect(LM, y - rh, CW, rh, fill=1, stroke=0)
+        c.setFillColor(NAVY)
+        c.setFont(DJSB, 6)
+        c.drawString(TLM, y - rh + 0.8 * mm, "№")
+        c.drawString(LM + 10 * mm, y - rh + 0.8 * mm, "Фактор")
+        c.drawString(LM + 60 * mm, y - rh + 0.8 * mm, "Сдвиг")
+        c.drawString(LM + 85 * mm, y - rh + 0.8 * mm, "Обоснование")
+        y -= rh
+
+        for i, f in enumerate(factors[:8]):
+            if not isinstance(f, dict):
+                f = {"name": str(f)}
+            bg = LGRAY if i % 2 == 0 else WHITE
+            c.setFillColor(bg)
+            c.rect(LM, y - rh, CW, rh, fill=1, stroke=0)
+            c.setFillColor(BLACK)
+            c.setFont(DJS, 5.8)
+            c.drawString(TLM, y - rh + 0.8 * mm, str(f.get("num", i + 1)))
+            c.drawString(LM + 10 * mm, y - rh + 0.8 * mm, str(f.get("name", ""))[:26])
+            shift_text = str(f.get("shift", ""))
+            try:
+                c.setFillColor(BLUE if fav_short.split()[-1].lower() in shift_text.lower() else ORANGE)
+            except Exception:
+                c.setFillColor(BLUE)
+            c.setFont(DJSB, 5.8)
+            c.drawString(LM + 60 * mm, y - rh + 0.8 * mm, shift_text[:22])
+            c.setFillColor(BLACK)
+            c.setFont(DJS, 5.8)
+            c.drawString(LM + 85 * mm, y - rh + 0.8 * mm, str(f.get("reason", ""))[:45])
+            y -= rh
+
+    # Probability bar
+    y -= 3 * mm
+    y = _sbar(c, "ИТОГОВАЯ ВЕРОЯТНОСТЬ", y, gap=1 * mm)
+    bar_h = 6 * mm
+    bar_x = LM + 5 * mm
+    bar_w = CW - 10 * mm
+    c.setFillColor(GREEN)
+    c.rect(bar_x, y - bar_h, bar_w * p, bar_h, fill=1, stroke=0)
+    c.setFillColor(RED)
+    c.rect(bar_x + bar_w * p, y - bar_h, bar_w * (1 - p), bar_h, fill=1, stroke=0)
+    c.setFillColor(WHITE)
+    c.setFont(DJSB, 8)
+    c.drawString(bar_x + 2 * mm, y - bar_h + 1.5 * mm,
+                 f"{fav_short} {round(p * 100)}%")
+    c.drawRightString(bar_x + bar_w - 2 * mm, y - bar_h + 1.5 * mm,
+                      f"{round((1 - p) * 100)}% {dog_short}")
+
+    _footer(c)
+    c.showPage()
+
+    # ═══════════ PAGE 2 ═══════════
+    y = H - 15 * mm
+    h = 10 * mm
+    c.setFillColor(NAVY)
+    c.rect(LM, y - h, CW, h, fill=1, stroke=0)
+    c.setFillColor(WHITE)
+    c.setFont(DJSB, 10)
+    c.drawString(TLM, y - h + 3 * mm,
+                 f"{sport_emoji} РАСШИРЕННЫЙ АНАЛИЗ | {fav_name} vs {dog_name}")
+    y -= h + 3 * mm
+
+    # Score distribution by format
+    y = _sbar(c, "РАСПРЕДЕЛЕНИЕ ПО КАРТАМ + ВЕРОЯТНОСТИ", y, gap=1 * mm)
+    rh2 = 3.3 * mm
+
+    if fmt.lower() == "bo5":
+        prob_rows = [
+            ("Победитель", f"{fav_short} {round(p * 100)}%", f"{dog_short} {round((1 - p) * 100)}%"),
+            ("Счёт 3-0 / 0-3", f"{round(dist.get('3-0', 0) * 100)}%", f"{round(dist.get('0-3', 0) * 100)}%"),
+            ("Счёт 3-1 / 1-3", f"{round(dist.get('3-1', 0) * 100)}%", f"{round(dist.get('1-3', 0) * 100)}%"),
+            ("Счёт 3-2 / 2-3", f"{round(dist.get('3-2', 0) * 100)}%", f"{round(dist.get('2-3', 0) * 100)}%"),
+        ]
+    elif fmt.lower() == "bo1":
+        prob_rows = [
+            ("Победитель", f"{fav_short} {round(p * 100)}%", f"{dog_short} {round((1 - p) * 100)}%"),
+        ]
+    else:  # Bo3 default
+        prob_rows = [
+            ("Победитель", f"{fav_short} {round(p * 100)}%", f"{dog_short} {round((1 - p) * 100)}%"),
+            ("Счёт 2-0 / 0-2", f"{round(dist.get('2-0', 0) * 100)}%", f"{round(dist.get('0-2', 0) * 100)}%"),
+            ("Счёт 2-1 / 1-2", f"{round(dist.get('2-1', 0) * 100)}%", f"{round(dist.get('1-2', 0) * 100)}%"),
+        ]
+
+    for i, (label, v1, v2) in enumerate(prob_rows):
+        bg = LBLUE if i % 2 == 0 else WHITE
+        c.setFillColor(bg)
+        c.rect(LM, y - rh2, CW, rh2, fill=1, stroke=0)
+        c.setFillColor(BLACK)
+        c.setFont(DJS, 6.5)
+        c.drawString(TLM, y - rh2 + 0.8 * mm, label)
+        c.setFont(DJSB, 6.5)
+        c.drawString(LM + 65 * mm, y - rh2 + 0.8 * mm, v1)
+        c.setFont(DJS, 6.5)
+        if v2:
+            c.drawString(LM + 105 * mm, y - rh2 + 0.8 * mm, v2)
+        y -= rh2
+    y -= 2 * mm
+
+    # Map veto / draft
+    veto = data.get("map_veto", {}) or {}
+    if isinstance(veto, dict) and veto:
+        title = "ОЖИДАЕМЫЕ ГЕРОИ / ДРАФТ" if is_dota else "ВЕТО КАРТ / ОЖИДАЕМЫЙ МАП-ПУЛ"
+        y = _sbar(c, title, y, gap=2 * mm)
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        for key in ("bans", "picks", "expected_maps"):
+            v = veto.get(key)
+            if not v:
+                continue
+            if isinstance(v, list):
+                v = ", ".join(str(x) for x in v)
+            y -= 3 * mm
+            c.drawString(TLM, y, f"{key}: {str(v)[:115]}")
+        y -= 2 * mm
+
+    # Style / conditions
+    for key, title in [("style_analysis", "СТИЛИСТИЧЕСКИЙ РАЗБОР"),
+                       ("conditions", "УСЛОВИЯ И КОНТЕКСТ")]:
+        v = data.get(key, "")
+        if v and isinstance(v, str):
+            y = _sbar(c, title, y, gap=2 * mm)
+            c.setFont(DJS, 6)
+            c.setFillColor(BLACK)
+            for line in _wrap(c, str(v), DJS, 6, mw):
+                y -= 2.8 * mm
+                c.drawString(TLM, y, line)
+            y -= 2 * mm
+
+    # Scenarios
+    scenarios = data.get("scenarios", []) or []
+    if isinstance(scenarios, list) and scenarios:
+        y = _sbar(c, "КЛЮЧЕВЫЕ СЦЕНАРИИ МАТЧА", y, gap=1 * mm)
+        for sc in scenarios[:3]:
+            if not isinstance(sc, dict):
+                sc = {"text": str(sc)}
+            c.setFont(DJSB, 6)
+            c.setFillColor(BLUE)
+            y -= 3.5 * mm
+            c.drawString(TLM, y, str(sc.get("title", ""))[:95])
+            c.setFont(DJS, 5.5)
+            c.setFillColor(BLACK)
+            for wl in _wrap(c, str(sc.get("text", "")), DJS, 5.5, mw):
+                y -= 2.5 * mm
+                c.drawString(TLM, y, wl)
+            y -= 2 * mm
+
+    # Verdict
+    verdict = data.get("verdict", "")
+    if verdict:
+        vh = 6 * mm
+        c.setFillColor(GREEN)
+        c.rect(LM, y - vh, CW, vh, fill=1, stroke=0)
+        c.setFillColor(WHITE)
+        c.setFont(DJSB, 8)
+        c.drawString(TLM, y - vh + 1.8 * mm,
+                     f"ФИНАЛЬНЫЙ ВЕРДИКТ: {fav_short} {round(p * 100)}% | {fmt}")
+        y -= vh + 2 * mm
+
+        c.setFont(DJS, 6)
+        c.setFillColor(BLACK)
+        for line in _wrap(c, str(verdict), DJS, 6, mw):
+            y -= 3 * mm
+            c.drawString(TLM, y, line)
+        y -= 4 * mm
+
+    # Confidence badge
+    confidence = data.get("confidence", "")
+    if confidence:
+        ci_h = 4.5 * mm
+        c.setFillColor(GOLD)
+        c.rect(LM, y - ci_h, CW, ci_h, fill=1, stroke=0)
+        c.setFillColor(NAVY)
+        c.setFont(DJSB, 6.5)
+        c.drawString(TLM, y - ci_h + 1 * mm,
+                     f"УВЕРЕННОСТЬ: {confidence} | {sport_label} Methodology")
+
+    _footer(c)
+    c.showPage()
+    c.save()
+
+    return fpath
+
+
 def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
     """Generate a clean PDF with today's match schedule."""
     os.makedirs(PDF_DIR, exist_ok=True)
