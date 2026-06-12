@@ -467,6 +467,16 @@ def format_cs2_summary(data: dict) -> str:
     lines.append(f"<b>{fav.get('short', fav.get('name', ''))} {fav_pct}%</b> — {dog.get('short', dog.get('name', ''))} {100 - fav_pct}%")
     lines.append("")
 
+    # Player status
+    ps = data.get("player_status", {})
+    if ps:
+        lines.append("🏥 <b>Состояние игроков:</b>")
+        if ps.get("team1"):
+            lines.append(f"  {t1.get('short', t1.get('name', 'T1'))}: {str(ps['team1'])[:100]}")
+        if ps.get("team2"):
+            lines.append(f"  {t2.get('short', t2.get('name', 'T2'))}: {str(ps['team2'])[:100]}")
+        lines.append("")
+
     # Map veto
     veto = data.get("map_veto", {})
     maps = veto.get("expected_maps", [])
@@ -603,6 +613,12 @@ def format_dota2_summary(data: dict) -> str:
         if meta.get("current_patch"): lines.append(f"  Патч: {meta['current_patch']}")
         if meta.get("team1_fit"): lines.append(f"  {t1.get('short', '')}: {meta['team1_fit']}")
         if meta.get("team2_fit"): lines.append(f"  {t2.get('short', '')}: {meta['team2_fit']}")
+        lines.append("")
+    ps = data.get("player_status", {})
+    if ps:
+        lines.append("🏥 <b>Состояние игроков:</b>")
+        if ps.get("team1"): lines.append(f"  {t1.get('short', t1.get('name', 'T1'))}: {str(ps['team1'])[:100]}")
+        if ps.get("team2"): lines.append(f"  {t2.get('short', t2.get('name', 'T2'))}: {str(ps['team2'])[:100]}")
         lines.append("")
     factors = data.get("factors", [])
     if factors:
