@@ -491,6 +491,11 @@ def format_cs2_summary(data: dict) -> str:
         if len(verdict) > 350:
             verdict = verdict[:347] + "..."
         lines.append(verdict)
+        lines.append("")
+
+    confidence = data.get("confidence", "")
+    if confidence:
+        lines.append(f"📌 Уверенность: <b>{confidence}</b>")
 
     lines.append("")
     lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
@@ -610,6 +615,10 @@ def format_dota2_summary(data: dict) -> str:
         lines.append(f"🏆 <b>Вердикт:</b>")
         if len(verdict) > 350: verdict = verdict[:347] + "..."
         lines.append(verdict)
+        lines.append("")
+    confidence = data.get("confidence", "")
+    if confidence:
+        lines.append(f"📌 Уверенность: <b>{confidence}</b>")
     lines.append("")
     lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
     return "\n".join(lines)
