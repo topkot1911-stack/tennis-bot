@@ -291,6 +291,7 @@ async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob=data.get("probability", 0.5), fav=favd.get("name", "?"),
                 tournament=data.get("tournament", "?"),
                 confidence=data.get("confidence", "?"),
+                sport="tennis",
             )
         except Exception:
             pass
@@ -715,6 +716,7 @@ async def cmd_cs2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 prob=data.get("probability", 0.5), fav=favd.get("name", "?"),
                 tournament=data.get("tournament", "CS2"),
                 confidence=data.get("confidence", "?"),
+                sport="cs2",
             )
         except Exception:
             pass
@@ -788,7 +790,8 @@ async def cmd_dota2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             favd = t1 if fav_idx == 1 else t2
             db.save_prediction(p1=t1.get("name","?"), p2=t2.get("name","?"),
                 prob=data.get("probability",0.5), fav=favd.get("name","?"),
-                tournament=data.get("tournament","Dota2"), confidence=data.get("confidence","?"))
+                tournament=data.get("tournament","Dota2"), confidence=data.get("confidence","?"),
+                sport="dota2")
         except Exception: pass
         await wait_msg.delete()
         await _safe_reply(update.message, summary)
@@ -859,21 +862,92 @@ async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_accuracy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show prediction accuracy statistics."""
-    stats = db.get_prediction_stats()
-
-    if stats["total"] == 0:
+    """Show prediction accuracy (hit-rate, Brier score) over last 7/30 days."""
+    counts = db.get_prediction_stats()
+    if counts["total"] == 0:
         await update.message.reply_text("📊 Пока нет прогнозов для статистики.")
         return
 
-    lines = [f"📊 <b>Статистика прогнозов</b>\n", f"Всего прогнозов: {stats['total']}\n"]
-    lines.append("<b>По дням:</b>")
-    for day in stats["by_date"][:10]:
-        lines.append(f"  {day['date']}: {day['c']} анализов")
-    lines.append(f"\nДля проверки точности: /results")
-    lines.append(f"Для экспорта: /export (владелец)")
+    def fmt_block(window):
+        s = db.get_accuracy_stats(days=window)
+        if not s["total"]:
+            return f"  <i>За {window} дн.: нет резолвнутых матчей</i>"
+        out = [f"<b>За {window} дней:</b>",
+               f"  • Резолвнуто: {s['resolved']}",
+               f"  • Hit-rate: <b>{round(s['hit_rate']*100, 1)}%</b> "
+               f"({s['correct']}/{s['resolved']})",
+               f"  • Brier score: <b>{s['brier']}</b> (0=идеал, 0.25=орёл/решка)"]
+        if s["by_sport"]:
+            out.append("  • По спортам:")
+            for sport, slot in s["by_sport"].items():
+                out.append(f"      {sport}: {round(slot['hit_rate']*100, 1)}% "
+                           f"({slot['correct']}/{slot['total']}), Brier {slot['brier']}")
+        return "\n".join(out)
 
+    lines = [
+        "📊 <b>Точность прогнозов</b>",
+        f"Всего прогнозов в БД: {counts['total']}",
+        "",
+        fmt_block(7),
+        "",
+        fmt_block(30),
+        "",
+        "<i>Резолвить исход: /setresult &lt;id&gt; &lt;fav|dog&gt; (владелец)</i>",
+        "<i>Найти id матча: /findpred &lt;имя_игрока&gt;</i>",
+    ]
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def cmd_setresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: mark a prediction as resolved.
+       Usage: /setresult <id> <fav|dog>
+       fav = favourite won (bot was right), dog = underdog won (bot was wrong).
+    """
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ Только владелец.")
+        return
+    args = context.args or []
+    if len(args) != 2 or not args[0].isdigit() or args[1].lower() not in ("fav", "dog", "1", "0"):
+        await update.message.reply_text(
+            "Использование: <code>/setresult &lt;id&gt; &lt;fav|dog&gt;</code>\n"
+            "Пример: <code>/setresult 42 fav</code> — фаворит победил",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    pid = int(args[0])
+    fav_won = args[1].lower() in ("fav", "1")
+    ok = db.set_outcome(pid, fav_won)
+    if ok:
+        await update.message.reply_text(
+            f"✅ Прогноз #{pid} помечен как "
+            f"{'фаворит победил' if fav_won else 'фаворит проиграл'}."
+        )
+    else:
+        await update.message.reply_text(f"❌ Прогноз #{pid} не найден.")
+
+
+async def cmd_findpred(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Look up prediction ids by player/team name (today's predictions)."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID and not db.is_vip(user_id):
+        await update.message.reply_text("⭐ VIP-функция.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: <code>/findpred &lt;часть имени&gt;</code>",
+                                         parse_mode=ParseMode.HTML)
+        return
+    needle = " ".join(context.args)
+    rows = db.find_prediction(needle)
+    if not rows:
+        await update.message.reply_text(f"Не найдено прогнозов с «{needle}» сегодня.")
+        return
+    out = ["🔍 Найденные прогнозы (сегодня):"]
+    for r in rows[:10]:
+        status = "✅" if r.get("outcome") == 1 else ("❌" if r.get("outcome") == 0 else "⏳")
+        out.append(f"  {status} #{r['id']}: {r['p1']} vs {r['p2']} — {r['fav']} {round(r['prob']*100)}% "
+                   f"({r.get('tournament','?')})")
+    await update.message.reply_text("\n".join(out))
 
 
 async def cmd_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1108,6 +1182,9 @@ def main():
     app.add_handler(CommandHandler("subscribe", cmd_subscribe))
     app.add_handler(CommandHandler("export", cmd_export))
     app.add_handler(CommandHandler("accuracy", cmd_accuracy))
+    app.add_handler(CommandHandler("stats", cmd_accuracy))  # alias
+    app.add_handler(CommandHandler("setresult", cmd_setresult))
+    app.add_handler(CommandHandler("findpred", cmd_findpred))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("results", cmd_results))

@@ -41,21 +41,115 @@ def init_db():
             PRIMARY KEY (user_id, date)
         );
     """)
+    # Add outcome columns to predictions (idempotent)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(predictions)").fetchall()}
+    if "outcome" not in cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN outcome INTEGER")  # 1 = fav won, 0 = dog won, NULL = pending
+    if "resolved_at" not in cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN resolved_at TIMESTAMP")
+    if "sport" not in cols:
+        conn.execute("ALTER TABLE predictions ADD COLUMN sport TEXT DEFAULT 'tennis'")
     conn.commit()
     conn.close()
+
+
+# ── Outcome tracking ──
+
+def set_outcome(prediction_id: int, fav_won: bool) -> bool:
+    """Mark a prediction as resolved. Returns True if a row was updated."""
+    conn = _conn()
+    cur = conn.execute(
+        "UPDATE predictions SET outcome=?, resolved_at=CURRENT_TIMESTAMP WHERE id=?",
+        (1 if fav_won else 0, prediction_id)
+    )
+    conn.commit()
+    updated = cur.rowcount
+    conn.close()
+    return updated > 0
+
+
+def find_prediction(p1_or_p2: str, target_date: str = None):
+    """Locate predictions by player/team name on a given date (or today). Helps the
+    admin resolve outcomes without remembering numeric ids."""
+    if target_date is None:
+        target_date = date.today().isoformat()
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT * FROM predictions WHERE date=? AND (p1 LIKE ? OR p2 LIKE ?) ORDER BY id DESC",
+        (target_date, f"%{p1_or_p2}%", f"%{p1_or_p2}%")
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_accuracy_stats(days: int = 30) -> dict:
+    """
+    Computes hit-rate, Brier score, and per-sport breakdown over the last `days`.
+
+    hit_rate    = correct / resolved
+    brier_score = mean (predicted_prob_of_outcome - actual_outcome)^2
+                  where actual_outcome = 1 if favorite won, 0 otherwise
+                  → lower is better, 0.25 = coin flip, 0 = perfect
+    """
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    conn = _conn()
+    rows = conn.execute(
+        "SELECT prob, outcome, sport FROM predictions "
+        "WHERE date >= ? AND outcome IS NOT NULL",
+        (cutoff,)
+    ).fetchall()
+    conn.close()
+
+    total = len(rows)
+    if total == 0:
+        return {"total": 0, "hit_rate": None, "brier": None, "by_sport": {}}
+
+    correct = 0
+    brier_sum = 0.0
+    by_sport = {}
+    for r in rows:
+        prob = float(r["prob"] or 0.5)
+        actual = int(r["outcome"])
+        # bot called the favourite, so "correct" = favourite actually won
+        if actual == 1:
+            correct += 1
+        brier_sum += (prob - actual) ** 2
+        s = r["sport"] or "tennis"
+        slot = by_sport.setdefault(s, {"total": 0, "correct": 0, "brier_sum": 0.0})
+        slot["total"] += 1
+        slot["correct"] += actual
+        slot["brier_sum"] += (prob - actual) ** 2
+
+    for s, slot in by_sport.items():
+        slot["hit_rate"] = round(slot["correct"] / slot["total"], 3)
+        slot["brier"] = round(slot["brier_sum"] / slot["total"], 3)
+        del slot["brier_sum"]
+
+    return {
+        "total": total,
+        "resolved": total,
+        "correct": correct,
+        "hit_rate": round(correct / total, 3),
+        "brier": round(brier_sum / total, 3),
+        "by_sport": by_sport,
+        "days": days,
+    }
+
+
+def save_prediction(p1, p2, prob, fav, tournament, confidence, sport="tennis"):
+    conn = _conn()
+    cur = conn.execute(
+        "INSERT INTO predictions (date, p1, p2, prob, fav, tournament, confidence, sport) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (date.today().isoformat(), p1, p2, prob, fav, tournament, confidence, sport)
+    )
+    pid = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return pid
 
 
 # ── Predictions ──
-
-def save_prediction(p1, p2, prob, fav, tournament, confidence):
-    conn = _conn()
-    conn.execute(
-        "INSERT INTO predictions (date, p1, p2, prob, fav, tournament, confidence) VALUES (?,?,?,?,?,?,?)",
-        (date.today().isoformat(), p1, p2, prob, fav, tournament, confidence)
-    )
-    conn.commit()
-    conn.close()
-
 
 def get_predictions(target_date=None):
     if target_date is None:

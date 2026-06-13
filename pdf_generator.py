@@ -838,6 +838,65 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
             c.drawString(TLM, y, _fit(c, f"{key}: {_to_text(v)}", DJS, 6, CW - 6 * mm))
         y -= 2 * mm
 
+    # Per-map win-rate bar chart (CS2 only)
+    if not is_dota:
+        wr1 = t1.get("map_winrates") or {}
+        wr2 = t2.get("map_winrates") or {}
+        if isinstance(wr1, dict) and isinstance(wr2, dict) and (wr1 or wr2):
+            y = _sbar(c, "WIN-RATE ПО КАРТАМ (последние 3 мес.)", y, gap=2 * mm)
+            # Map order: union, but keep canonical active duty first
+            canonical = ["Mirage", "Inferno", "Nuke", "Anubis", "Ancient",
+                         "Dust2", "Dust 2", "Overpass", "Vertigo"]
+            seen = []
+            for m in canonical:
+                if m in wr1 or m in wr2:
+                    seen.append(m)
+            for m in list(wr1.keys()) + list(wr2.keys()):
+                if m not in seen:
+                    seen.append(m)
+
+            row_h = 4.5 * mm
+            label_x = TLM
+            bar1_x = LM + 38 * mm
+            bar_w = 55 * mm
+            bar2_x = bar1_x + bar_w + 6 * mm  # leaves a gap for the team name
+            # Header row
+            c.setFont(DJSB, 5.8)
+            c.setFillColor(NAVY)
+            c.drawString(label_x, y - 2.5 * mm, "Карта")
+            c.drawString(bar1_x, y - 2.5 * mm, _fit(c, t1_name, DJSB, 5.8, bar_w))
+            c.drawString(bar2_x, y - 2.5 * mm, _fit(c, t2_name, DJSB, 5.8, bar_w))
+            y -= 4 * mm
+            for m in seen[:7]:
+                w1 = float(wr1.get(m, 0) or 0)
+                w2 = float(wr2.get(m, 0) or 0)
+                # Normalize: 0..1 if Claude gave fraction, 0..100 if percent
+                if w1 > 1: w1 /= 100.0
+                if w2 > 1: w2 /= 100.0
+                # Row label
+                c.setFillColor(BLACK)
+                c.setFont(DJS, 6)
+                c.drawString(label_x, y - row_h + 1.2 * mm, _fit(c, m, DJS, 6, 35 * mm))
+                # Bars
+                for (bx, w, color) in [
+                    (bar1_x, w1, BLUE),
+                    (bar2_x, w2, accent),
+                ]:
+                    # Track
+                    c.setFillColor(LGRAY)
+                    c.rect(bx, y - row_h + 1 * mm, bar_w, 2.5 * mm, fill=1, stroke=0)
+                    # Filled portion
+                    if w > 0:
+                        c.setFillColor(color)
+                        c.rect(bx, y - row_h + 1 * mm, bar_w * w, 2.5 * mm, fill=1, stroke=0)
+                    # Numeric label
+                    c.setFillColor(BLACK)
+                    c.setFont(DJSB, 5.5)
+                    c.drawString(bx + bar_w + 1 * mm, y - row_h + 1.4 * mm,
+                                 f"{round(w * 100)}%")
+                y -= row_h
+            y -= 2 * mm
+
     # Style / conditions
     for key, title in [("style_analysis", "СТИЛИСТИЧЕСКИЙ РАЗБОР"),
                        ("conditions", "УСЛОВИЯ И КОНТЕКСТ")]:
