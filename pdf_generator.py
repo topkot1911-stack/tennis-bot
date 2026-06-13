@@ -79,8 +79,71 @@ except Exception:
     DJSB = 'Helvetica-Bold'
 
 
+import re as _re
+_EMOJI_RE = _re.compile(
+    "["
+    "\U0001F300-\U0001F6FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002600-\U000027BF"
+    "\U0001F000-\U0001F2FF"
+    "]+",
+    flags=_re.UNICODE,
+)
+
+def _strip_emoji(text):
+    """Remove emoji glyphs that DejaVu cannot render (appears as boxes)."""
+    if not isinstance(text, str):
+        text = str(text)
+    return _EMOJI_RE.sub("", text).strip()
+
+
+def _to_text(value, max_items=4):
+    """
+    Normalize any value (dict, list, None, str, number) into a readable plain-text
+    string suitable for drawing in PDF. Fixes the bug where raw JSON like
+    {'total': '...', 'recent_matches': [...]} was shown verbatim in H2H/map_veto/player_status.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        parts = []
+        for item in value[:max_items]:
+            t = _to_text(item, max_items=max_items)
+            if t:
+                parts.append(t)
+        return "; ".join(parts)
+    if isinstance(value, dict):
+        # Common patterns we know about
+        if "total" in value or "overall" in value:
+            head = str(value.get("total") or value.get("overall") or "")
+            extras = []
+            # surfaces nesting: {"grass": "...", "hard": "..."}
+            if isinstance(value.get("surfaces"), dict):
+                for k, v in list(value["surfaces"].items())[:3]:
+                    extras.append(f"{k}: {_to_text(v)}")
+            # recent_matches list
+            rm = value.get("recent_matches") or value.get("recent")
+            if isinstance(rm, list) and rm:
+                last = rm[0]
+                if isinstance(last, dict):
+                    extras.append(f"last: {last.get('event','')} {last.get('result','')}".strip())
+            return head + (" | " + " · ".join(extras) if extras else "")
+        # generic dict — render key:value pairs
+        parts = []
+        for k, v in list(value.items())[:max_items]:
+            parts.append(f"{k}: {_to_text(v)}")
+        return " | ".join(parts)
+    return str(value)
+
+
 def _wrap(c, text, font, size, max_w):
     """Word-wrap text into lines."""
+    text = _strip_emoji(_to_text(text))
     words = text.split()
     lines, line = [], ""
     for w in words:
@@ -96,6 +159,20 @@ def _wrap(c, text, font, size, max_w):
     return lines
 
 
+def _fit(c, text, font, size, max_w):
+    """
+    Truncate text to fit width with an ellipsis. Replaces blind [:N] slicing
+    that caused mid-word breaks like "...на другом покрытии (гл".
+    """
+    text = _strip_emoji(_to_text(text))
+    if c.stringWidth(text, font, size) <= max_w:
+        return text
+    ell = "…"
+    while text and c.stringWidth(text + ell, font, size) > max_w:
+        text = text[:-1]
+    return (text.rstrip() + ell) if text else ell
+
+
 def _sbar(c, title, y, gap=3 * mm):
     """Section bar."""
     y -= gap
@@ -104,20 +181,113 @@ def _sbar(c, title, y, gap=3 * mm):
     c.rect(LM, y - h, CW, h, fill=1, stroke=0)
     c.setFillColor(WHITE)
     c.setFont(DJSB, 7.5)
-    c.drawString(TLM, y - h + 1.5 * mm, title)
+    c.drawString(TLM, y - h + 1.5 * mm, _strip_emoji(_to_text(title)))
     return y - h - 1 * mm
 
 
-def _footer(c):
-    """Page footer."""
+_SPORT_FOOTER = {
+    "tennis": "Tennis Analyst | Исследовательский анализ | Не является рекомендацией по ставкам",
+    "cs2":    "CS2 Analyst | Исследовательский анализ | Не является рекомендацией по ставкам",
+    "dota2":  "Dota 2 Analyst | Исследовательский анализ | Не является рекомендацией по ставкам",
+}
+
+def _footer(c, sport: str = "tennis"):
+    """Page footer. Sport-specific branding; defaults to tennis."""
     fh = 4.5 * mm
     fy = 10 * mm
     c.setFillColor(NAVY)
     c.rect(LM, fy, CW, fh, fill=1, stroke=0)
     c.setFillColor(WHITE)
     c.setFont(DJS, 5.5)
-    c.drawString(TLM, fy + 1.2 * mm,
-                 "Tennis Analyst Bot | Исследовательский анализ | Не является рекомендацией по ставкам")
+    text = _SPORT_FOOTER.get(sport, _SPORT_FOOTER["tennis"])
+    c.drawString(TLM, fy + 1.2 * mm, text)
+
+
+def _ensure_tennis_distribution(dist: dict, p: float, bo: int) -> dict:
+    """
+    Backfill tennis distribution with model defaults derived from p (match win prob)
+    when Claude's JSON didn't supply them. Eliminates the bug where every PDF showed
+    identical E(total)=23.5 / 80 min due to constant fallbacks.
+    """
+    dist = dict(dist or {})
+    # Score distribution by best-of
+    if bo == 5:
+        # Approximate: assume per-set prob ≈ p^(1/2.6) so that match prob comes back to p
+        # We solve numerically via short search to keep things deterministic.
+        s = _solve_set_prob(p, bo=5)
+        dist.setdefault('3-0', s**3)
+        dist.setdefault('3-1', 3 * s**3 * (1 - s))
+        dist.setdefault('3-2', 6 * s**3 * (1 - s) ** 2)
+        dist.setdefault('0-3', (1 - s) ** 3)
+        dist.setdefault('1-3', 3 * (1 - s) ** 3 * s)
+        dist.setdefault('2-3', 6 * (1 - s) ** 3 * s ** 2)
+        expected_sets_fav = 3 * dist['3-0'] + 3 * dist['3-1'] + 3 * dist['3-2']
+        expected_sets_dog = 3 * dist['0-3'] + 3 * dist['1-3'] + 3 * dist['2-3']
+    else:
+        s = _solve_set_prob(p, bo=3)
+        dist.setdefault('2-0', s * s)
+        dist.setdefault('2-1', 2 * s * s * (1 - s))
+        dist.setdefault('0-2', (1 - s) ** 2)
+        dist.setdefault('1-2', 2 * (1 - s) ** 2 * s)
+        expected_sets_fav = 2 * dist['2-0'] + 2 * dist['2-1']
+        expected_sets_dog = 2 * dist['0-2'] + 2 * dist['1-2']
+
+    # Per-set total games depends on closeness (more even → closer to 10, more lopsided → 9)
+    closeness = 1 - abs(p - 0.5) * 2  # 1 at 50/50, 0 at 100/0
+    avg_games_per_set = 9.4 + 1.0 * closeness  # 9.4..10.4
+    e_total = round(avg_games_per_set * (
+        sum_played_sets(bo, dist)
+    ), 1)
+    dist.setdefault('e_total', e_total)
+    # Individual totals: split E(total) by serve dominance proxy
+    e_fav = round(e_total * (0.5 + 0.05 * (p - 0.5) * 4), 1)  # mild skew
+    e_dog = round(e_total - e_fav, 1)
+    dist.setdefault('e_fav', e_fav)
+    dist.setdefault('e_dog', e_dog)
+    # Handicap: expected games margin rounded to .5 step
+    margin = max(0.5, round((e_fav - e_dog) * 2) / 2)
+    dist.setdefault('handicap', margin)
+    # Tiebreak probability rises with closeness; capped 0.25..0.85
+    dist.setdefault('p_tiebreak', round(0.30 + 0.45 * closeness, 2))
+    # Duration in minutes: 25..32 min per set
+    minutes_per_set = 26 + 6 * closeness
+    e_duration = int(minutes_per_set * sum_played_sets(bo, dist))
+    dist.setdefault('e_duration', e_duration)
+    return dist
+
+
+def sum_played_sets(bo: int, dist: dict) -> float:
+    """Expected number of sets played, used to derive E(total games) and duration."""
+    if bo == 5:
+        # 3 sets if 3-0 or 0-3; 4 sets if 3-1 or 1-3; 5 sets if 3-2 or 2-3
+        return (
+            3 * (dist.get('3-0', 0) + dist.get('0-3', 0))
+            + 4 * (dist.get('3-1', 0) + dist.get('1-3', 0))
+            + 5 * (dist.get('3-2', 0) + dist.get('2-3', 0))
+        )
+    return (
+        2 * (dist.get('2-0', 0) + dist.get('0-2', 0))
+        + 3 * (dist.get('2-1', 0) + dist.get('1-2', 0))
+    )
+
+
+def _solve_set_prob(p_match: float, bo: int) -> float:
+    """Numerically invert match-prob → per-set prob. Bisection on monotone func."""
+    lo, hi = 0.05, 0.95
+    target = max(0.02, min(0.98, p_match))
+    for _ in range(36):
+        mid = (lo + hi) / 2
+        if bo == 5:
+            # P(match) = s^3 (1 + 3(1-s) + 6(1-s)^2)
+            pm = mid ** 3 * (1 + 3 * (1 - mid) + 6 * (1 - mid) ** 2)
+        else:
+            # P(match) = s^2 + 2 s^2 (1-s) = s^2 (3 - 2s)
+            pm = mid * mid * (3 - 2 * mid)
+        if pm < target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
 
 
 def generate_pdf(data: dict) -> str:
@@ -199,15 +369,17 @@ def generate_pdf(data: dict) -> str:
             profile = [str(profile)]
         for line in profile[:6]:
             y -= 3 * mm
-            c.drawString(TLM, y, str(line)[:125])
+            c.drawString(TLM, y, _fit(c, line, DJS, 6, CW - 6 * mm))
         y -= 1 * mm
 
-    # H2H
+    # H2H — multi-line wrap (fixes raw JSON dump bug)
+    h2h_text = _to_text(data.get("h2h", "Данные не найдены"))
     y = _sbar(c, "H2H", y, gap=2 * mm)
     c.setFont(DJS, 6)
     c.setFillColor(BLACK)
-    y -= 3 * mm
-    c.drawString(TLM, y, str(data.get("h2h", "Данные не найдены"))[:125])
+    for ln in _wrap(c, h2h_text, DJS, 6, CW - 6 * mm)[:3]:
+        y -= 3 * mm
+        c.drawString(TLM, y, ln)
     y -= 1 * mm
 
     # Factors
@@ -231,14 +403,17 @@ def generate_pdf(data: dict) -> str:
         c.setFillColor(BLACK)
         c.setFont(DJS, 5.8)
         c.drawString(TLM, y - rh + 0.8 * mm, str(f.get("num", "")))
-        c.drawString(LM + 10 * mm, y - rh + 0.8 * mm, str(f.get("name", ""))[:26])
+        c.drawString(LM + 10 * mm, y - rh + 0.8 * mm,
+                     _fit(c, f.get("name", ""), DJS, 5.8, 48 * mm))
         shift_text = str(f.get("shift", ""))
-        c.setFillColor(BLUE if fav["name"].split()[-1] in shift_text else ORANGE)
+        c.setFillColor(BLUE if isinstance(fav.get("name"), str) and fav["name"].split()[-1] in shift_text else ORANGE)
         c.setFont(DJSB, 5.8)
-        c.drawString(LM + 60 * mm, y - rh + 0.8 * mm, shift_text[:22])
+        c.drawString(LM + 60 * mm, y - rh + 0.8 * mm,
+                     _fit(c, shift_text, DJSB, 5.8, 23 * mm))
         c.setFillColor(BLACK)
         c.setFont(DJS, 5.8)
-        c.drawString(LM + 85 * mm, y - rh + 0.8 * mm, str(f.get("reason", ""))[:45])
+        c.drawString(LM + 85 * mm, y - rh + 0.8 * mm,
+                     _fit(c, f.get("reason", ""), DJS, 5.8, CW - (85 * mm - LM) - 3 * mm))
         y -= rh
 
     # Probability bar
@@ -258,7 +433,7 @@ def generate_pdf(data: dict) -> str:
     c.drawRightString(bar_x + bar_w - 2 * mm, y - bar_h + 1.5 * mm,
                       f"{round((1 - p) * 100)}% {dog['name']}")
 
-    _footer(c)
+    _footer(c, "tennis")
     c.showPage()
 
     # ═══════════ PAGE 2 ═══════════
@@ -272,7 +447,8 @@ def generate_pdf(data: dict) -> str:
                  f"РАСШИРЕННЫЙ АНАЛИЗ | {fav.get('name_en', '')} vs {dog.get('name_en', '')}")
     y -= h + 3 * mm
 
-    # Set distribution table
+    # Set distribution table — auto-fill with sane model defaults if Claude omitted
+    dist = _ensure_tennis_distribution(dist, p, bo)
     y = _sbar(c, "РАСПРЕДЕЛЕНИЕ ПО СЕТАМ + ВЕРОЯТНОСТИ", y, gap=1 * mm)
     rh2 = 3.3 * mm
 
@@ -339,7 +515,7 @@ def generate_pdf(data: dict) -> str:
             y -= 2.8 * mm
             c.drawString(TLM, y, line)
 
-    _footer(c)
+    _footer(c, "tennis")
     c.showPage()
 
     # ═══════════ PAGE 3 — Scenarios + Verdict ═══════════
@@ -361,7 +537,7 @@ def generate_pdf(data: dict) -> str:
             c.setFont(DJSB, 6)
             c.setFillColor(BLUE)
             y -= 3.5 * mm
-            c.drawString(TLM, y, str(sc.get("title", ""))[:95])
+            c.drawString(TLM, y, _fit(c, sc.get("title", ""), DJSB, 6, CW - 6 * mm))
             c.setFont(DJS, 5.5)
             c.setFillColor(BLACK)
             for wl in _wrap(c, str(sc.get("text", "")), DJS, 5.5, mw):
@@ -401,7 +577,7 @@ def generate_pdf(data: dict) -> str:
         c.drawString(TLM, y - ci_h + 1 * mm,
                      f"УВЕРЕННОСТЬ: {confidence} | Методология v3")
 
-    _footer(c)
+    _footer(c, "tennis")
     c.showPage()
     c.save()
 
@@ -419,10 +595,12 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
     sport = (sport or "cs2").lower()
     is_dota = sport.startswith("dota")
     sport_label = "Dota 2" if is_dota else "CS2"
-    sport_emoji = "⚔️" if is_dota else "🎮"
+    # DejaVu does not render colour emoji — keep ASCII tags instead of the boxes.
+    sport_emoji = "[D2]" if is_dota else "[CS]"
     accent = RED if is_dota else HexColor('#E67E22')
     rank_key = "liquipedia_rank" if is_dota else "hltv_rank"
     rank_label = "Liquipedia" if is_dota else "HLTV"
+    footer_tag = "dota2" if is_dota else "cs2"
 
     t1 = data.get("team1", {}) or {}
     t2 = data.get("team2", {}) or {}
@@ -520,17 +698,19 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
             if not v:
                 continue
             y -= 3 * mm
-            c.drawString(TLM, y, f"{str(label)[:18]}: {str(v)[:105]}")
+            c.drawString(TLM, y,
+                         _fit(c, f"{_to_text(label)}: {_to_text(v)}", DJS, 6, CW - 6 * mm))
         y -= 1 * mm
 
-    # H2H
-    h2h = data.get("h2h", "")
-    if h2h:
+    # H2H — wrap into 3 lines max to avoid the truncation bug
+    h2h_text = _to_text(data.get("h2h", ""))
+    if h2h_text:
         y = _sbar(c, "H2H", y, gap=2 * mm)
         c.setFont(DJS, 6)
         c.setFillColor(BLACK)
-        y -= 3 * mm
-        c.drawString(TLM, y, str(h2h)[:125])
+        for ln in _wrap(c, h2h_text, DJS, 6, CW - 6 * mm)[:3]:
+            y -= 3 * mm
+            c.drawString(TLM, y, ln)
         y -= 1 * mm
 
     # Factors
@@ -557,17 +737,20 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
             c.setFillColor(BLACK)
             c.setFont(DJS, 5.8)
             c.drawString(TLM, y - rh + 0.8 * mm, str(f.get("num", i + 1)))
-            c.drawString(LM + 10 * mm, y - rh + 0.8 * mm, str(f.get("name", ""))[:26])
+            c.drawString(LM + 10 * mm, y - rh + 0.8 * mm,
+                         _fit(c, f.get("name", ""), DJS, 5.8, 48 * mm))
             shift_text = str(f.get("shift", ""))
             try:
                 c.setFillColor(BLUE if fav_short.split()[-1].lower() in shift_text.lower() else ORANGE)
             except Exception:
                 c.setFillColor(BLUE)
             c.setFont(DJSB, 5.8)
-            c.drawString(LM + 60 * mm, y - rh + 0.8 * mm, shift_text[:22])
+            c.drawString(LM + 60 * mm, y - rh + 0.8 * mm,
+                         _fit(c, shift_text, DJSB, 5.8, 23 * mm))
             c.setFillColor(BLACK)
             c.setFont(DJS, 5.8)
-            c.drawString(LM + 85 * mm, y - rh + 0.8 * mm, str(f.get("reason", ""))[:45])
+            c.drawString(LM + 85 * mm, y - rh + 0.8 * mm,
+                         _fit(c, f.get("reason", ""), DJS, 5.8, CW - (85 * mm - LM) - 3 * mm))
             y -= rh
 
     # Probability bar
@@ -587,7 +770,7 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
     c.drawRightString(bar_x + bar_w - 2 * mm, y - bar_h + 1.5 * mm,
                       f"{round((1 - p) * 100)}% {dog_short}")
 
-    _footer(c)
+    _footer(c, footer_tag)
     c.showPage()
 
     # ═══════════ PAGE 2 ═══════════
@@ -652,7 +835,7 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
             if isinstance(v, list):
                 v = ", ".join(str(x) for x in v)
             y -= 3 * mm
-            c.drawString(TLM, y, f"{key}: {str(v)[:115]}")
+            c.drawString(TLM, y, _fit(c, f"{key}: {_to_text(v)}", DJS, 6, CW - 6 * mm))
         y -= 2 * mm
 
     # Style / conditions
@@ -678,7 +861,7 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
             c.setFont(DJSB, 6)
             c.setFillColor(BLUE)
             y -= 3.5 * mm
-            c.drawString(TLM, y, str(sc.get("title", ""))[:95])
+            c.drawString(TLM, y, _fit(c, sc.get("title", ""), DJSB, 6, CW - 6 * mm))
             c.setFont(DJS, 5.5)
             c.setFillColor(BLACK)
             for wl in _wrap(c, str(sc.get("text", "")), DJS, 5.5, mw):
@@ -716,7 +899,7 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
         c.drawString(TLM, y - ci_h + 1 * mm,
                      f"УВЕРЕННОСТЬ: {confidence} | {sport_label} Methodology")
 
-    _footer(c)
+    _footer(c, footer_tag)
     c.showPage()
     c.save()
 
@@ -756,7 +939,7 @@ def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
 
         # Page break check
         if y < 25 * mm:
-            _footer(c)
+            _footer(c, "tennis")
             c.showPage()
             y = H - 15 * mm
             row_idx = 0
@@ -826,7 +1009,7 @@ def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
         c.setFillColor(GRAY)
         for wl in _wrap(c, line, DJS, 6.5, mw):
             if y < 25 * mm:
-                _footer(c)
+                _footer(c, "tennis")
                 c.showPage()
                 y = H - 15 * mm
             y -= 3 * mm
@@ -843,7 +1026,7 @@ def generate_today_pdf(text: str, date_str: str, lang: str = "ru") -> str:
     c.setFillColor(BLUE)
     c.drawString(TLM, y, note)
 
-    _footer(c)
+    _footer(c, "tennis")
     c.showPage()
     c.save()
 

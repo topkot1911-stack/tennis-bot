@@ -2,8 +2,176 @@
 
 import json
 import math
+import logging
+import re
 import anthropic
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, SYSTEM_PROMPT, CS2_SYSTEM_PROMPT, DOTA2_SYSTEM_PROMPT
+
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════
+# SELF-CHECK / NORMALIZATION (applied to every analyze_* result)
+# ═══════════════════════════════════════════════════════════
+
+_MOTIV_KEYWORDS = ("мотивац", "motivat", "психолог", "psychol")
+_PCT_RE = re.compile(r"([+-]?)\s*(\d+(?:[.,]\d+)?)\s*%")
+
+
+def _parse_shift_pct(shift_text: str):
+    """Extract a signed percentage value from a factor 'shift' string. Returns 0 on failure."""
+    if not isinstance(shift_text, str):
+        return 0.0
+    m = _PCT_RE.search(shift_text)
+    if not m:
+        return 0.0
+    sign = -1.0 if m.group(1) == "-" else 1.0
+    try:
+        return sign * float(m.group(2).replace(",", "."))
+    except ValueError:
+        return 0.0
+
+
+def _dict_to_text(value, max_items=4):
+    """Plain-text rendering of any dict/list — same idea as pdf_generator._to_text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_dict_to_text(x, max_items) for x in value[:max_items]]
+        return "; ".join(p for p in parts if p)
+    if isinstance(value, dict):
+        if "total" in value or "overall" in value:
+            head = str(value.get("total") or value.get("overall") or "")
+            extras = []
+            if isinstance(value.get("surfaces"), dict):
+                for k, v in list(value["surfaces"].items())[:3]:
+                    extras.append(f"{k}: {_dict_to_text(v)}")
+            rm = value.get("recent_matches") or value.get("recent")
+            if isinstance(rm, list) and rm:
+                last = rm[0]
+                if isinstance(last, dict):
+                    extras.append(f"{last.get('event','')} {last.get('result','')}".strip())
+            return head + (" | " + " · ".join(extras) if extras else "")
+        parts = [f"{k}: {_dict_to_text(v)}" for k, v in list(value.items())[:max_items]]
+        return " | ".join(parts)
+    return str(value)
+
+
+def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
+    """
+    Post-process Claude's raw JSON before sending it to the PDF/text formatter.
+    Enforces methodology rules so contradictions never reach the user:
+
+    1. H2H / map_veto / player_status as dicts → coerced to readable strings
+    2. Motivation factors capped at ±5 % total (per methodology)
+    3. Probability clamped to [0.05, 0.95]
+    4. Low-data detection → confidence forced to «Низкая»
+    5. Verdict text rewritten to quote the same probability the bar shows
+    6. Factor count + sum logged as warnings if outside expectations
+    """
+    if not isinstance(data, dict):
+        return data
+    if "_raw_text" in data:
+        # raw fallback — don't touch, just normalize H2H if present
+        return data
+
+    # ── 1) H2H / map_veto / player_status normalization ────────────────
+    if "h2h" in data and not isinstance(data["h2h"], str):
+        data["h2h"] = _dict_to_text(data["h2h"])
+    if "map_veto" in data and isinstance(data["map_veto"], dict):
+        # keep as dict (pdf_generator iterates keys), but normalize each value
+        for k, v in list(data["map_veto"].items()):
+            if not isinstance(v, (str, list)):
+                data["map_veto"][k] = _dict_to_text(v)
+    if "player_status" in data and isinstance(data["player_status"], dict):
+        for k, v in list(data["player_status"].items()):
+            if not isinstance(v, str):
+                data["player_status"][k] = _dict_to_text(v)
+
+    # ── 2) Probability sanity ─────────────────────────────────────────
+    try:
+        p = float(data.get("probability", 0.5))
+    except (TypeError, ValueError):
+        p = 0.5
+    p = max(0.05, min(0.95, p))
+    data["probability"] = round(p, 3)
+
+    # ── 3) Motivation cap (±5 %) ──────────────────────────────────────
+    factors = data.get("factors") or []
+    motivational = []
+    other_total = 0.0
+    for f in factors:
+        if not isinstance(f, dict):
+            continue
+        name = str(f.get("name", "")).lower()
+        shift_val = _parse_shift_pct(f.get("shift", ""))
+        if any(k in name for k in _MOTIV_KEYWORDS):
+            motivational.append((f, shift_val))
+        else:
+            other_total += shift_val
+
+    motiv_sum = sum(v for _, v in motivational)
+    if abs(motiv_sum) > 5 and motivational:
+        scale = 5 / abs(motiv_sum)
+        for f, _ in motivational:
+            old = f.get("shift", "")
+            new_val = _parse_shift_pct(old) * scale
+            sign = "+" if new_val >= 0 else "−"
+            f["shift"] = f"{sign}{abs(new_val):.1f}% (capped)"
+        logger.info("Motivation factor scaled %.2f → %.2f", motiv_sum, motiv_sum * scale)
+
+    # ── 4) Low-data detection ─────────────────────────────────────────
+    low_data = False
+    if sport == "cs2":
+        r1 = (data.get("team1") or {}).get("hltv_rank")
+        r2 = (data.get("team2") or {}).get("hltv_rank")
+        if not r1 and not r2:
+            low_data = True
+    elif sport.startswith("dota"):
+        r1 = (data.get("team1") or {}).get("liquipedia_rank")
+        r2 = (data.get("team2") or {}).get("liquipedia_rank")
+        if (r1 in (None, "", "?", "#?")) and (r2 in (None, "", "?", "#?")):
+            low_data = True
+        # Tier-3 quals — also low-data
+        tname = str(data.get("tournament", "")).lower()
+        if "open qualifier" in tname or "tier 3" in tname or "tier-3" in tname:
+            low_data = True
+    else:  # tennis
+        r1 = (data.get("player1") or {}).get("rank")
+        r2 = (data.get("player2") or {}).get("rank")
+        if not r1 and not r2:
+            low_data = True
+
+    if low_data:
+        data["confidence"] = "Низкая (мало данных — Tier-3 или нет рейтингов)"
+        # If Claude pretended to be confident in spite of weak data, pull p toward 50/50
+        p = data["probability"]
+        data["probability"] = round(0.5 + (p - 0.5) * 0.5, 3)
+
+    # ── 5) Verdict ≡ bar — make sure the percentage in the verdict matches ─
+    verdict = data.get("verdict", "")
+    if isinstance(verdict, str) and verdict:
+        actual_pct = round(data["probability"] * 100)
+        # Strip any "Фактически XX-YY" tail (was a source of contradictions)
+        verdict = re.sub(r"\bФактически\s+\d+\s*[-‒–—]\s*\d+\s*\.?", "", verdict).strip()
+        # Replace the first stray "NN%" that isn't equal to actual_pct
+        def _fix(m):
+            v = int(m.group(1))
+            return f"{actual_pct}%" if abs(v - actual_pct) > 2 else m.group(0)
+        verdict = re.sub(r"(\d{1,3})\s*%", _fix, verdict, count=1)
+        data["verdict"] = verdict
+
+    # ── 6) Factor-count diagnostics (don't fail, just log) ───────────
+    n_factors = len([f for f in factors if isinstance(f, dict)])
+    if n_factors < 8:
+        logger.warning("Only %d factors returned for %s match; methodology asks for ≥8.",
+                       n_factors, sport)
+
+    return data
 
 
 # ═══════════════════════════════════════════════════════════
@@ -185,7 +353,7 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
                 data["distribution"] = bo5_distribution(p)
             else:
                 data["distribution"] = bo3_distribution(p)
-            return data
+            return _validate_and_normalize(data, "tennis")
 
     # Strategy 2: find the largest {...} block in text
     data = None
@@ -228,7 +396,7 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
     else:
         data["distribution"] = bo3_distribution(p)
 
-    return data
+    return _validate_and_normalize(data, "tennis")
 
 
 def format_summary(data: dict) -> str:
@@ -391,7 +559,7 @@ async def analyze_cs2(query: str, lang_suffix: str = "") -> dict:
                 data["distribution"] = {"p_win": p}
             else:
                 data["distribution"] = bo3_distribution(p)
-            return data
+            return _validate_and_normalize(data, "cs2")
         except json.JSONDecodeError:
             pass
 
@@ -434,7 +602,7 @@ async def analyze_cs2(query: str, lang_suffix: str = "") -> dict:
     else:
         data["distribution"] = bo3_distribution(p)
 
-    return data
+    return _validate_and_normalize(data, "cs2")
 
 
 def format_cs2_summary(data: dict) -> str:
@@ -553,7 +721,7 @@ async def analyze_dota2(query: str, lang_suffix: str = "") -> dict:
             if fmt == "Bo5": data["distribution"] = bo5_distribution(p)
             elif fmt in ("Bo1","Bo2"): data["distribution"] = {"p_win": p}
             else: data["distribution"] = bo3_distribution(p)
-            return data
+            return _validate_and_normalize(data, "dota2")
         except json.JSONDecodeError:
             pass
     data = None; best_len = 0; i = 0
@@ -582,7 +750,7 @@ async def analyze_dota2(query: str, lang_suffix: str = "") -> dict:
     if fmt == "Bo5": data["distribution"] = bo5_distribution(p)
     elif fmt in ("Bo1","Bo2"): data["distribution"] = {"p_win": p}
     else: data["distribution"] = bo3_distribution(p)
-    return data
+    return _validate_and_normalize(data, "dota2")
 
 
 def format_dota2_summary(data: dict) -> str:
