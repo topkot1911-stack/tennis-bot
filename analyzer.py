@@ -210,6 +210,18 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
     except (TypeError, ValueError):
         p = 0.5
     p = max(0.05, min(0.95, p))
+
+    # ── 2b) Flip favorite when probability < 0.5 ────────────────────
+    # If Claude labelled team1/player1 as favorite=1 but supplied
+    # probability < 0.5, the actual favourite is the OTHER side. This is
+    # the classic "Legacy фаворит 48%" contradiction seen in the wild.
+    # We invert: favorite ↔ other side, probability ↔ 1 - probability.
+    if p < 0.5:
+        cur_fav = data.get("favorite", 1)
+        data["favorite"] = 2 if cur_fav == 1 else 1
+        p = 1.0 - p
+        logger.info("Validator: flipped favorite (%s → %s) and probability (%.3f → %.3f)",
+                    cur_fav, data["favorite"], 1 - p, p)
     data["probability"] = round(p, 3)
 
     # ── 3) Motivation cap (±5 %) ──────────────────────────────────────
@@ -303,10 +315,39 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
                 dist[key] = round(dist[key] * 0.40, 1)
         data["_resumed"] = True
 
-    # ── 5) Verdict ≡ bar — make sure the percentage in the verdict matches ─
+    # ── 5) Verdict ≡ bar — make sure name AND percentage match the bar ─
     verdict = data.get("verdict", "")
     if isinstance(verdict, str) and verdict:
         actual_pct = round(data["probability"] * 100)
+        fav_idx = data.get("favorite", 1)
+        # Determine the actual favorite and underdog names
+        if sport in ("cs2", "dota2"):
+            fav_obj = data.get("team1") if fav_idx == 1 else data.get("team2")
+            dog_obj = data.get("team2") if fav_idx == 1 else data.get("team1")
+        else:
+            fav_obj = data.get("player1") if fav_idx == 1 else data.get("player2")
+            dog_obj = data.get("player2") if fav_idx == 1 else data.get("player1")
+        fav_name = ""
+        dog_name = ""
+        for obj, slot in ((fav_obj, "fav"), (dog_obj, "dog")):
+            if isinstance(obj, dict):
+                n = obj.get("short") or obj.get("name") or ""
+                if slot == "fav": fav_name = str(n)
+                else: dog_name = str(n)
+
+        # If a flip happened (probability got swapped), the verdict still
+        # mentions the old wrong favorite. Replace the underdog's name with
+        # the favorite's name when it appears as the "favourite" / "fav 48%".
+        if fav_name and dog_name and dog_name in verdict:
+            # Match patterns like "Legacy 48%", "Legacy — фаворит", "Legacy фаворит"
+            patt = re.compile(
+                rf"\b{re.escape(dog_name)}\b\s*"
+                rf"(?:[—\-–]?\s*(?:небольшой\s+)?фаворит|"
+                rf"\d{{1,3}}\s*%\s*\(?\s*(?:фактически|фаворит)?)",
+                re.IGNORECASE,
+            )
+            verdict = patt.sub(lambda m: m.group(0).replace(dog_name, fav_name, 1), verdict)
+
         # Strip any "Фактически XX-YY" tail (was a source of contradictions)
         verdict = re.sub(r"\bФактически\s+\d+\s*[-‒–—]\s*\d+\s*\.?", "", verdict).strip()
         # Replace the first stray "NN%" that isn't equal to actual_pct
