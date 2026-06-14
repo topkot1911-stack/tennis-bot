@@ -180,6 +180,49 @@ def _tournament_known(name: str) -> bool:
     return True
 
 
+def _fav_dog_names(data: dict, sport: str):
+    """Return (fav_short, dog_short, fav_obj, dog_obj) based on current favorite index."""
+    fav_idx = data.get("favorite", 1)
+    if sport in ("cs2", "dota2"):
+        t1, t2 = data.get("team1"), data.get("team2")
+    else:
+        t1, t2 = data.get("player1"), data.get("player2")
+    fav_obj = t1 if fav_idx == 1 else t2
+    dog_obj = t2 if fav_idx == 1 else t1
+
+    def _short(obj):
+        if not isinstance(obj, dict):
+            return ""
+        return str(obj.get("short") or obj.get("name") or "").strip()
+
+    return _short(fav_obj), _short(dog_obj), fav_obj, dog_obj
+
+
+def _net_factor_shift_for_fav(factors, fav_name: str, dog_name: str) -> float:
+    """
+    Sum factor shifts and return the net pull toward `fav_name`.
+      +N → factors agree fav should win
+      -N → factors contradict (they actually favour the underdog)
+    """
+    if not isinstance(factors, list):
+        return 0.0
+    fav_low = fav_name.lower() if fav_name else ""
+    dog_low = dog_name.lower() if dog_name else ""
+    net = 0.0
+    for f in factors:
+        if not isinstance(f, dict):
+            continue
+        shift_text = str(f.get("shift", ""))
+        val = _parse_shift_pct(shift_text)
+        text_low = shift_text.lower()
+        if fav_low and fav_low in text_low:
+            net += val
+        elif dog_low and dog_low in text_low:
+            net -= val
+        # else: neutral / "обоим" / unclear
+    return net
+
+
 def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
     """
     Post-process Claude's raw JSON before sending it to the PDF/text formatter.
@@ -223,6 +266,27 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
         logger.info("Validator: flipped favorite (%s → %s) and probability (%.3f → %.3f)",
                     cur_fav, data["favorite"], 1 - p, p)
     data["probability"] = round(p, 3)
+
+    # ── 2c) Factor-consistency check: factors sum must support assigned probability ──
+    # If net of all factor shifts strongly pulls toward the underdog (>3%),
+    # the bot's narrative contradicts its probability — flip everything so
+    # the narrative wins. This catches «G2 62%, but all factors favor Legacy».
+    _raw_factors = data.get("factors") or []
+    _fav_n, _dog_n, _, _ = _fav_dog_names(data, sport)
+    _net = _net_factor_shift_for_fav(_raw_factors, _fav_n, _dog_n)
+    if _net < -3 and _raw_factors:
+        cur_fav = data.get("favorite", 1)
+        data["favorite"] = 2 if cur_fav == 1 else 1
+        # Keep probability magnitude — factors were right, just attached to wrong side.
+        # If p < 0.5, also invert it so the new fav has > 50 %.
+        if data["probability"] < 0.5:
+            data["probability"] = round(1 - data["probability"], 3)
+        p = data["probability"]
+        logger.warning(
+            "Validator: factor sum %.1f%% contradicts probability — flipped "
+            "favorite (%s → %s); new fav P = %.3f",
+            _net, cur_fav, data["favorite"], p,
+        )
 
     # ── 3) Motivation cap (±5 %) ──────────────────────────────────────
     factors = data.get("factors") or []
@@ -356,6 +420,18 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
             return f"{actual_pct}%" if abs(v - actual_pct) > 2 else m.group(0)
         verdict = re.sub(r"(\d{1,3})\s*%", _fix, verdict, count=1)
         data["verdict"] = verdict
+
+    # ── 5b) Confidence badge — strip mention of underdog as favorite ──
+    conf = data.get("confidence", "")
+    if isinstance(conf, str) and conf and fav_name and dog_name and dog_name in conf:
+        # Patterns like "Legacy явные фавориты", "Legacy чемпионы"
+        patt2 = re.compile(
+            rf"\b{re.escape(dog_name)}\b\s*(?:\w+\s+)?(?:фаворит|favourit|чемпион|preferred|fav)",
+            re.IGNORECASE,
+        )
+        new_conf = patt2.sub(lambda m: m.group(0).replace(dog_name, fav_name, 1), conf)
+        if new_conf != conf:
+            data["confidence"] = new_conf
 
     # ── 6) Factor-count diagnostics (don't fail, just log) ───────────
     n_factors = len([f for f in factors if isinstance(f, dict)])
