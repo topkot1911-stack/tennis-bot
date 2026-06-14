@@ -61,17 +61,129 @@ def _dict_to_text(value, max_items=4):
     return str(value)
 
 
+def _detect_resumed_match(data: dict) -> bool:
+    """Detect tennis match that's resumed mid-way (only 3rd set remaining etc.)."""
+    blobs = " ".join(str(data.get(k, "")) for k in ("round", "stage", "date", "court", "tournament"))
+    blobs = blobs.lower()
+    triggers = ["resumed", "продолжен", "доигровк", "3-й сет", "3rd set", "third set", "финальный сет"]
+    return any(t in blobs for t in triggers)
+
+
+def _validate_scenarios(scenarios, bo: int) -> list:
+    """
+    Bo3 allows only {2-0, 2-1, 0-2, 1-2}; Bo5 only {3-0, 3-1, 3-2, 0-3, 1-3, 2-3}.
+    Replace invalid scores with a "?" placeholder and add note. Cleans the bot's
+    occasional "3-0" / "1-3" garbage in Bo3 matches.
+    """
+    if not isinstance(scenarios, list):
+        return scenarios
+    valid_bo3 = {"2-0", "2-1", "0-2", "1-2"}
+    valid_bo5 = {"3-0", "3-1", "3-2", "0-3", "1-3", "2-3"}
+    valid = valid_bo3 if bo == 3 else valid_bo5
+    score_re = re.compile(r"\b(\d-\d)\b")
+    fixed = []
+    for sc in scenarios:
+        if not isinstance(sc, dict):
+            fixed.append(sc); continue
+        title = str(sc.get("title", "")) or ""
+        text = str(sc.get("text", "")) or ""
+        # If title contains an invalid Bo3/Bo5 score, replace it
+        m = score_re.search(title)
+        if m and m.group(1) not in valid:
+            new = m.group(1)
+            # Naive flip: 3-X → 2-X' if Bo3
+            if bo == 3:
+                a, b = new.split("-")
+                a, b = int(a), int(b)
+                a = min(a, 2); b = min(b, 2)
+                if a == b: a, b = 2, 1  # avoid 2-2 nonsense
+                fixed_score = f"{a}-{b}"
+            else:
+                fixed_score = "3-2"
+            sc = dict(sc)
+            sc["title"] = title.replace(m.group(1), fixed_score)
+            sc["_score_fixed"] = True
+        # Also strip stupid clauses like "(но в BO3 это невозможно)"
+        text = re.sub(r"\([^)]*невозможн[^)]*\)\s*\.?", "", text, flags=re.IGNORECASE).strip()
+        if text != sc.get("text"):
+            sc = dict(sc)
+            sc["text"] = text
+        fixed.append(sc)
+    return fixed
+
+
+def _normalize_scenario_probs(scenarios) -> list:
+    """Scale scenario probability tags to sum to 100% (±2% tolerance)."""
+    if not isinstance(scenarios, list):
+        return scenarios
+    pct_re = re.compile(r"~?\s*(\d+(?:[.,]\d+)?)\s*%")
+    probs = []
+    for sc in scenarios:
+        if not isinstance(sc, dict):
+            probs.append(None); continue
+        m = pct_re.search(str(sc.get("title", "")))
+        if not m:
+            m = pct_re.search(str(sc.get("text", "")))
+        probs.append(float(m.group(1).replace(",", ".")) if m else None)
+    valid = [p for p in probs if p is not None]
+    if not valid:
+        return scenarios
+    total = sum(valid)
+    if 98 <= total <= 102:
+        return scenarios
+    if total <= 0:
+        return scenarios
+    scale = 100.0 / total
+    out = []
+    for sc, p in zip(scenarios, probs):
+        if p is None:
+            out.append(sc); continue
+        new_p = round(p * scale)
+        sc = dict(sc)
+        sc["title"] = pct_re.sub(f"~{new_p}%", str(sc.get("title", "")), count=1)
+        out.append(sc)
+    return out
+
+
+def _normalize_factor_sum(factors, cap: float) -> list:
+    """If Σ|shift| exceeds cap (e.g. 22%), scale all factors down proportionally."""
+    if not isinstance(factors, list):
+        return factors
+    total = sum(abs(_parse_shift_pct(f.get("shift", ""))) for f in factors if isinstance(f, dict))
+    if total <= cap or total == 0:
+        return factors
+    scale = cap / total
+    out = []
+    for f in factors:
+        if not isinstance(f, dict):
+            out.append(f); continue
+        val = _parse_shift_pct(f.get("shift", "")) * scale
+        sign = "+" if val >= 0 else "−"
+        # Preserve trailing words (player/team name)
+        text = str(f.get("shift", ""))
+        rest = re.sub(_PCT_RE, "", text, count=1).strip()
+        f = dict(f)
+        f["shift"] = f"{sign}{abs(val):.1f}% {rest}".strip()
+        out.append(f)
+    return out
+
+
+def _tournament_known(name: str) -> bool:
+    """Hard list of recognisable tournaments — used to flag «Unknown» as low-data."""
+    if not name:
+        return False
+    n = name.lower()
+    if any(w in n for w in ("неизвест", "unknown", "tbd", "n/a")):
+        return False
+    if len(n.strip()) < 3:
+        return False
+    return True
+
+
 def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
     """
     Post-process Claude's raw JSON before sending it to the PDF/text formatter.
-    Enforces methodology rules so contradictions never reach the user:
-
-    1. H2H / map_veto / player_status as dicts → coerced to readable strings
-    2. Motivation factors capped at ±5 % total (per methodology)
-    3. Probability clamped to [0.05, 0.95]
-    4. Low-data detection → confidence forced to «Низкая»
-    5. Verdict text rewritten to quote the same probability the bar shows
-    6. Factor count + sum logged as warnings if outside expectations
+    Enforces methodology rules so contradictions never reach the user.
     """
     if not isinstance(data, dict):
         return data
@@ -146,11 +258,50 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
         if not r1 and not r2:
             low_data = True
 
+    # ── 4b) Tournament detection — «Unknown» must trigger low-data ───────
+    if not _tournament_known(data.get("tournament", "")):
+        low_data = True
+        data["_tournament_unknown"] = True
+
     if low_data:
-        data["confidence"] = "Низкая (мало данных — Tier-3 или нет рейтингов)"
+        data["confidence"] = "Низкая (мало данных — Tier-3, неизвестный турнир или нет рейтингов)"
         # If Claude pretended to be confident in spite of weak data, pull p toward 50/50
         p = data["probability"]
         data["probability"] = round(0.5 + (p - 0.5) * 0.5, 3)
+
+    # ── 4c) Sum-of-factors cap (esports ≤22%, tennis ≤20%) ────────────
+    cap = 22 if sport in ("cs2", "dota2") else 20
+    if factors:
+        data["factors"] = _normalize_factor_sum(factors, cap)
+        factors = data["factors"]
+
+    # ── 4d) Scenario format & sum validators ─────────────────────────
+    bo = data.get("bo", 3)
+    fmt = str(data.get("format", "")).lower()
+    if fmt == "bo5" or bo == 5:
+        bo_n = 5
+    elif fmt == "bo1":
+        bo_n = 1
+    else:
+        bo_n = 3
+    if "scenarios" in data and isinstance(data["scenarios"], list):
+        data["scenarios"] = _validate_scenarios(data["scenarios"], bo_n)
+        data["scenarios"] = _normalize_scenario_probs(data["scenarios"])
+
+    # ── 4e) Resumed match — slash E(total) / duration proportionally ──
+    if _detect_resumed_match(data) and isinstance(data.get("distribution"), dict):
+        dist = data["distribution"]
+        # Assume only ~1 set remaining
+        for key in ("e_total",):
+            if key in dist and isinstance(dist[key], (int, float)):
+                dist[key] = round(dist[key] * 0.40, 1)
+        for key in ("e_duration",):
+            if key in dist and isinstance(dist[key], (int, float)):
+                dist[key] = int(dist[key] * 0.40)
+        for key in ("e_fav", "e_dog"):
+            if key in dist and isinstance(dist[key], (int, float)):
+                dist[key] = round(dist[key] * 0.40, 1)
+        data["_resumed"] = True
 
     # ── 5) Verdict ≡ bar — make sure the percentage in the verdict matches ─
     verdict = data.get("verdict", "")

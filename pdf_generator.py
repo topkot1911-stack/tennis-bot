@@ -575,7 +575,7 @@ def generate_pdf(data: dict) -> str:
         c.setFillColor(NAVY)
         c.setFont(DJSB, 6.5)
         c.drawString(TLM, y - ci_h + 1 * mm,
-                     f"УВЕРЕННОСТЬ: {confidence} | Методология v3")
+                     f"УВЕРЕННОСТЬ: {confidence} | Методология v5")
 
     _footer(c, "tennis")
     c.showPage()
@@ -956,7 +956,7 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
         c.setFillColor(NAVY)
         c.setFont(DJSB, 6.5)
         c.drawString(TLM, y - ci_h + 1 * mm,
-                     f"УВЕРЕННОСТЬ: {confidence} | {sport_label} Methodology")
+                     f"УВЕРЕННОСТЬ: {confidence} | {sport_label} Methodology v2")
 
     _footer(c, footer_tag)
     c.showPage()
