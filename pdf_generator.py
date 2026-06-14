@@ -205,54 +205,44 @@ def _footer(c, sport: str = "tennis"):
 
 def _ensure_tennis_distribution(dist: dict, p: float, bo: int) -> dict:
     """
-    Backfill tennis distribution with model defaults derived from p (match win prob)
-    when Claude's JSON didn't supply them. Eliminates the bug where every PDF showed
-    identical E(total)=23.5 / 80 min due to constant fallbacks.
+    Always RECOMPUTE distribution from p + bo. Don't trust Claude's e_total or
+    duration because the model repeatedly hallucinates the same numbers
+    (e.g. 23.4 / 80 min) across different matches. Score breakdowns are also
+    overridden — they must be mathematically consistent with p.
     """
     dist = dict(dist or {})
-    # Score distribution by best-of
+    # Score distribution by best-of (ALWAYS overwrite)
     if bo == 5:
-        # Approximate: assume per-set prob ≈ p^(1/2.6) so that match prob comes back to p
-        # We solve numerically via short search to keep things deterministic.
         s = _solve_set_prob(p, bo=5)
-        dist.setdefault('3-0', s**3)
-        dist.setdefault('3-1', 3 * s**3 * (1 - s))
-        dist.setdefault('3-2', 6 * s**3 * (1 - s) ** 2)
-        dist.setdefault('0-3', (1 - s) ** 3)
-        dist.setdefault('1-3', 3 * (1 - s) ** 3 * s)
-        dist.setdefault('2-3', 6 * (1 - s) ** 3 * s ** 2)
-        expected_sets_fav = 3 * dist['3-0'] + 3 * dist['3-1'] + 3 * dist['3-2']
-        expected_sets_dog = 3 * dist['0-3'] + 3 * dist['1-3'] + 3 * dist['2-3']
+        dist['3-0'] = round(s ** 3, 3)
+        dist['3-1'] = round(3 * s ** 3 * (1 - s), 3)
+        dist['3-2'] = round(6 * s ** 3 * (1 - s) ** 2, 3)
+        dist['0-3'] = round((1 - s) ** 3, 3)
+        dist['1-3'] = round(3 * (1 - s) ** 3 * s, 3)
+        dist['2-3'] = round(6 * (1 - s) ** 3 * s ** 2, 3)
     else:
         s = _solve_set_prob(p, bo=3)
-        dist.setdefault('2-0', s * s)
-        dist.setdefault('2-1', 2 * s * s * (1 - s))
-        dist.setdefault('0-2', (1 - s) ** 2)
-        dist.setdefault('1-2', 2 * (1 - s) ** 2 * s)
-        expected_sets_fav = 2 * dist['2-0'] + 2 * dist['2-1']
-        expected_sets_dog = 2 * dist['0-2'] + 2 * dist['1-2']
+        dist['2-0'] = round(s * s, 3)
+        dist['2-1'] = round(2 * s * s * (1 - s), 3)
+        dist['0-2'] = round((1 - s) ** 2, 3)
+        dist['1-2'] = round(2 * (1 - s) ** 2 * s, 3)
 
-    # Per-set total games depends on closeness (more even → closer to 10, more lopsided → 9)
-    closeness = 1 - abs(p - 0.5) * 2  # 1 at 50/50, 0 at 100/0
-    avg_games_per_set = 9.4 + 1.0 * closeness  # 9.4..10.4
-    e_total = round(avg_games_per_set * (
-        sum_played_sets(bo, dist)
-    ), 1)
-    dist.setdefault('e_total', e_total)
-    # Individual totals: split E(total) by serve dominance proxy
-    e_fav = round(e_total * (0.5 + 0.05 * (p - 0.5) * 4), 1)  # mild skew
-    e_dog = round(e_total - e_fav, 1)
-    dist.setdefault('e_fav', e_fav)
-    dist.setdefault('e_dog', e_dog)
-    # Handicap: expected games margin rounded to .5 step
-    margin = max(0.5, round((e_fav - e_dog) * 2) / 2)
-    dist.setdefault('handicap', margin)
-    # Tiebreak probability rises with closeness; capped 0.25..0.85
-    dist.setdefault('p_tiebreak', round(0.30 + 0.45 * closeness, 2))
-    # Duration in minutes: 25..32 min per set
+    # Per-set total games depends on closeness
+    closeness = 1 - abs(p - 0.5) * 2  # 1 at 50/50, 0 at lopsided
+    avg_games_per_set = 9.4 + 1.0 * closeness  # 9.4..10.4 games / set
+    played = sum_played_sets(bo, dist)
+    dist['e_total'] = round(avg_games_per_set * played, 1)
+    # Individual totals: split with mild skew toward favorite
+    skew = 0.5 + 0.05 * (p - 0.5) * 4  # 0.5..0.6
+    dist['e_fav'] = round(dist['e_total'] * skew, 1)
+    dist['e_dog'] = round(dist['e_total'] - dist['e_fav'], 1)
+    # Handicap rounded to .5
+    dist['handicap'] = max(0.5, round((dist['e_fav'] - dist['e_dog']) * 2) / 2)
+    # Tiebreak probability: 0.30..0.75 by closeness
+    dist['p_tiebreak'] = round(0.30 + 0.45 * closeness, 2)
+    # Duration: 26..32 min / set
     minutes_per_set = 26 + 6 * closeness
-    e_duration = int(minutes_per_set * sum_played_sets(bo, dist))
-    dist.setdefault('e_duration', e_duration)
+    dist['e_duration'] = int(minutes_per_set * played)
     return dist
 
 
@@ -821,9 +811,13 @@ def generate_esports_pdf(data: dict, sport: str = "cs2") -> str:
         y -= rh2
     y -= 2 * mm
 
-    # Map veto / draft
+    # Map veto / draft — only draw section if at least one sub-field has content
     veto = data.get("map_veto", {}) or {}
-    if isinstance(veto, dict) and veto:
+    veto_has_content = (
+        isinstance(veto, dict)
+        and any(veto.get(k) for k in ("bans", "picks", "expected_maps"))
+    )
+    if veto_has_content:
         title = "ОЖИДАЕМЫЕ ГЕРОИ / ДРАФТ" if is_dota else "ВЕТО КАРТ / ОЖИДАЕМЫЙ МАП-ПУЛ"
         y = _sbar(c, title, y, gap=2 * mm)
         c.setFont(DJS, 6)

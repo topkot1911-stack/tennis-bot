@@ -129,10 +129,13 @@ def _normalize_scenario_probs(scenarios) -> list:
     if not valid:
         return scenarios
     total = sum(valid)
-    if 98 <= total <= 102:
-        return scenarios
     if total <= 0:
         return scenarios
+    # Tighter tolerance: anything outside 99..101 gets rescaled. Previously
+    # 90% sums silently leaked into PDFs (G2/Legacy, de Minaur/Majchrzak).
+    if 99 <= total <= 101:
+        return scenarios
+    logger.info("Scenario probs sum=%.1f, rescaling to 100%%", total)
     scale = 100.0 / total
     out = []
     for sc, p in zip(scenarios, probs):
@@ -178,6 +181,217 @@ def _tournament_known(name: str) -> bool:
     if len(n.strip()) < 3:
         return False
     return True
+
+
+# ═══════════════════════════════════════════════════════════
+# WHITELISTS (P2 — anti-hallucination)
+# ═══════════════════════════════════════════════════════════
+
+# Current rosters of CS2 teams the bot tends to hallucinate about.
+# Format: lowercase team name → set of player nicks (case-insensitive match).
+# Keep ONLY the most-frequent-error teams; rosters change so prefer few rows.
+CS2_ROSTERS = {
+    "vitality":     {"zywoo", "apex", "ropz", "flamez", "mezii"},
+    "g2 esports":   {"niko", "hunter-", "m0nesy", "hooxi", "jks"},
+    "g2":           {"niko", "hunter-", "m0nesy", "hooxi", "jks"},
+    "navi":         {"w0nderful", "aleksib", "makazze", "im", "b1t"},
+    "natus vincere":{"w0nderful", "aleksib", "makazze", "im", "b1t"},
+    "mouz":         {"brollan", "torzsi", "jimpphat", "xertion", "spinx"},
+    "furia":        {"kscerato", "yuurih", "fallen", "yekindar", "molodoy"},
+    "spirit":       {"donk", "magixx", "chopper", "sh1ro", "zont1x"},
+    "team spirit":  {"donk", "magixx", "chopper", "sh1ro", "zont1x"},
+    "falcons":      {"niko", "kyousuke", "teses", "kyxsan", "m0nesy"},
+    "team falcons": {"niko", "kyousuke", "teses", "kyxsan", "m0nesy"},
+    "faze":         {"karrigan", "rain", "frozen", "broky", "jcobbb"},
+}
+
+# Players the bot has historically transliterated wrong. Apply globally.
+TRANSLIT_MAP = {
+    "Majchrzak":            "Майхжак",
+    "Mpetshi Perricard":    "Мпетши Перрикар",
+    "Mpetshi-Perricard":    "Мпетши-Перрикар",
+    "Borges":               "Боргес",
+    "Bublik":               "Бублик",
+    "Auger-Aliassime":      "Оже-Альяссим",
+    "de Minaur":            "де Минор",
+    "Lehecka":              "Лехечка",
+    "Shimabukuro":          "Симабукуро",
+    "Cilic":                "Чилич",
+    "Cobolli":              "Коболли",
+    "Tsitsipas":            "Циципас",
+    "Davidovich":           "Давидович",
+    "Hijikata":             "Хидзиката",
+    "Bellucci":             "Беллуччи",
+    "Kyrgios":              "Кириос",
+    "Shelton":              "Шелтон",
+    "Fritz":                "Фриц",
+    "Medvedev":             "Медведев",
+    # обратные кривые формы, которые точно надо подменить:
+    "Маихрзак":             "Майхжак",
+    "Майхрзак":             "Майхжак",
+    "Маjchrzak":            "Майхжак",
+    "Перриcard":            "Перрикар",
+    "Богард":               "Боргес",
+    "Боржеш":               "Боргес",
+    "Sinneру":              "Синнеру",
+    "Sinner":               "Синнер",
+}
+
+# ATP tour tier per tournament. Used to override the bot's frequent
+# "ATP 250 → ТБШ" mislabelling (ТБШ = Grand Slam — wrong for 250s).
+TENNIS_TIER_MAP = {
+    # Grand Slams
+    "australian open":   ("Grand Slam", "ТБШ"),
+    "roland garros":     ("Grand Slam", "ТБШ"),
+    "french open":       ("Grand Slam", "ТБШ"),
+    "wimbledon":         ("Grand Slam", "ТБШ"),
+    "us open":           ("Grand Slam", "ТБШ"),
+    # Masters 1000
+    "indian wells":      ("ATP Masters 1000", "Masters"),
+    "miami open":        ("ATP Masters 1000", "Masters"),
+    "monte-carlo":       ("ATP Masters 1000", "Masters"),
+    "madrid open":       ("ATP Masters 1000", "Masters"),
+    "rome":              ("ATP Masters 1000", "Masters"),
+    "canadian open":     ("ATP Masters 1000", "Masters"),
+    "cincinnati":        ("ATP Masters 1000", "Masters"),
+    "shanghai":          ("ATP Masters 1000", "Masters"),
+    "paris masters":     ("ATP Masters 1000", "Masters"),
+    # ATP 500
+    "halle":             ("ATP 500", "ATP 500"),
+    "queen's":           ("ATP 500", "ATP 500"),
+    "queens":            ("ATP 500", "ATP 500"),
+    "hsbc championships":("ATP 500", "ATP 500"),
+    "terra wortmann":    ("ATP 500", "ATP 500"),
+    "barcelona open":    ("ATP 500", "ATP 500"),
+    "rio open":          ("ATP 500", "ATP 500"),
+    "rotterdam":         ("ATP 500", "ATP 500"),
+    # ATP 250 — самые частые жертвы «ТБШ»-ошибки
+    "boss open":         ("ATP 250", "ATP 250"),
+    "stuttgart":         ("ATP 250", "ATP 250"),
+    "libema":            ("ATP 250", "ATP 250"),
+    "libéma":            ("ATP 250", "ATP 250"),
+    "'s-hertogenbosch":  ("ATP 250", "ATP 250"),
+    "s-hertogenbosch":   ("ATP 250", "ATP 250"),
+    "hertogenbosch":     ("ATP 250", "ATP 250"),
+    "rosmalen":          ("ATP 250", "ATP 250"),
+    "eastbourne":        ("ATP 250", "ATP 250"),
+    "mallorca":          ("ATP 250", "ATP 250"),
+    "newport":           ("ATP 250", "ATP 250"),
+}
+
+
+def _check_cs2_roster(data: dict) -> list:
+    """Return list of warning strings for players mentioned in team1/team2.star_player
+    that aren't actually on that team's current roster."""
+    warnings = []
+    for slot in ("team1", "team2"):
+        team = data.get(slot)
+        if not isinstance(team, dict):
+            continue
+        team_name = str(team.get("name", "")).lower().strip()
+        if team_name not in CS2_ROSTERS:
+            continue  # team not whitelisted, skip
+        allowed = CS2_ROSTERS[team_name]
+        star = str(team.get("star_player", "")).lower().strip()
+        if star and star.replace("[", "").replace("]", "") not in allowed:
+            warnings.append(
+                f"Roster check: {team.get('name')} star_player='{team.get('star_player')}' "
+                f"is NOT on current roster ({sorted(allowed)})"
+            )
+            # Auto-fix: blank the field rather than show wrong info
+            team["star_player"] = ""
+    return warnings
+
+
+def _apply_translit(text: str) -> str:
+    """Apply TRANSLIT_MAP substitutions everywhere — Latin→Russian or fix bad Russian."""
+    if not isinstance(text, str) or not text:
+        return text
+    for src, dst in TRANSLIT_MAP.items():
+        if src in text:
+            text = text.replace(src, dst)
+    return text
+
+
+def _translit_walk(value):
+    """Recursively apply translit to all strings in a dict/list structure."""
+    if isinstance(value, str):
+        return _apply_translit(value)
+    if isinstance(value, list):
+        return [_translit_walk(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _translit_walk(v) for k, v in value.items()}
+    return value
+
+
+def _tennis_tier_for(tournament_name: str):
+    """Return ('Grand Slam' / 'ATP 500' / etc, short_label) or (None, None)."""
+    if not tournament_name:
+        return None, None
+    n = tournament_name.lower()
+    for key, (long_label, short_label) in TENNIS_TIER_MAP.items():
+        if key in n:
+            return long_label, short_label
+    return None, None
+
+
+def _fix_tier_mislabels(data: dict, sport: str) -> dict:
+    """For tennis: if tournament is not a Grand Slam but text mentions ТБШ / Grand Slam,
+    replace with the correct tier label. Same for 'Masters 1000' / 'ATP 500'."""
+    if sport != "tennis":
+        return data
+    tour_name = str(data.get("tournament", ""))
+    long_label, short_label = _tennis_tier_for(tour_name)
+    if not long_label or "Grand Slam" in long_label:
+        return data  # tournament unknown or already a Grand Slam
+    # Patterns to replace in any text field
+    bad = [r"\bТБШ\b", r"\bGrand Slam\b", r"\bMasters\s*1000\b"]
+    for field in ("verdict", "style_analysis", "conditions"):
+        v = data.get(field, "")
+        if isinstance(v, str) and v:
+            for pat in bad:
+                v = re.sub(pat, short_label, v, flags=re.IGNORECASE)
+            data[field] = v
+    # Also fix profile lists
+    for p_key in ("player1", "player2"):
+        p = data.get(p_key)
+        if isinstance(p, dict) and isinstance(p.get("profile"), list):
+            new_prof = []
+            for line in p["profile"]:
+                if isinstance(line, str):
+                    for pat in bad:
+                        line = re.sub(pat, short_label, line, flags=re.IGNORECASE)
+                new_prof.append(line)
+            p["profile"] = new_prof
+    # Add tournament_tier field for downstream use
+    data["tournament_tier"] = long_label
+    return data
+
+
+def _fix_stage_inconsistency(data: dict, sport: str) -> dict:
+    """
+    Catches stage mislabelling like 'Quarterfinals / Upper Bracket' on a Swiss
+    Stage 3 Major (e.g. IEM Cologne). Replaces with the correct stage label
+    when the tournament name implies Swiss format.
+    """
+    if sport not in ("cs2", "dota2"):
+        return data
+    stage = str(data.get("stage", "")).strip()
+    tournament = str(data.get("tournament", "")).lower()
+    # Major or IEM Swiss stage tournaments — typical pattern
+    is_swiss = any(w in tournament for w in (
+        "major", "iem", "blast", "swiss",
+    ))
+    bad_stage_keywords = ("quarterfinals", "quarter-final", "qf", "upper bracket",
+                          "playoff", "semifinal", "final")
+    if is_swiss and stage and any(w in stage.lower() for w in bad_stage_keywords) \
+       and "swiss" not in stage.lower():
+        # Demote to neutral wording — actual round determination needs richer signal
+        data["_stage_was"] = stage
+        data["stage"] = "Swiss Stage (round unspecified)"
+        logger.warning("Validator: stage '%s' looks like playoff label on a Swiss "
+                       "tournament '%s'; replaced", stage, tournament)
+    return data
 
 
 def _fav_dog_names(data: dict, sport: str):
@@ -432,6 +646,37 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
         new_conf = patt2.sub(lambda m: m.group(0).replace(dog_name, fav_name, 1), conf)
         if new_conf != conf:
             data["confidence"] = new_conf
+
+    # ── 5c) Stage sanity (Swiss tournament shouldn't say "Quarterfinals") ──
+    data = _fix_stage_inconsistency(data, sport)
+
+    # ── 5d) Tier-label sanity (ATP 250 ≠ ТБШ) — tennis only ─────────
+    data = _fix_tier_mislabels(data, sport)
+
+    # ── 5e) CS2 roster whitelist — flag/blank wrong star_player ───────
+    if sport == "cs2":
+        for w in _check_cs2_roster(data):
+            logger.warning(w)
+
+    # ── 5f) Translit pass — global Russian-name correction ────────────
+    # Apply only to user-visible string fields to avoid touching keys
+    for field in ("verdict", "style_analysis", "conditions", "tournament", "stage", "h2h"):
+        if field in data and isinstance(data[field], str):
+            data[field] = _apply_translit(data[field])
+    for p_key in ("player1", "player2", "team1", "team2"):
+        if isinstance(data.get(p_key), dict):
+            for sub in ("name", "name_en", "star_player", "profile"):
+                if sub in data[p_key]:
+                    data[p_key][sub] = _translit_walk(data[p_key][sub])
+    if isinstance(data.get("factors"), list):
+        new_factors = []
+        for f in data["factors"]:
+            if isinstance(f, dict):
+                f = {k: _translit_walk(v) for k, v in f.items()}
+            new_factors.append(f)
+        data["factors"] = new_factors
+    if isinstance(data.get("scenarios"), list):
+        data["scenarios"] = _translit_walk(data["scenarios"])
 
     # ── 6) Factor-count diagnostics (don't fail, just log) ───────────
     n_factors = len([f for f in factors if isinstance(f, dict)])
