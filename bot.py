@@ -927,6 +927,65 @@ async def cmd_setresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Прогноз #{pid} не найден.")
 
 
+async def cmd_exportdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: send full database backup (CSV + JSON) to private chat."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ Только владелец.")
+        return
+    import io
+    from datetime import date as _date
+    stats = db.get_prediction_stats()
+    today_str = _date.today().isoformat()
+
+    csv_data = db.export_csv()
+    json_data = db.export_full_json()
+
+    await update.message.reply_document(
+        document=io.BytesIO(csv_data.encode("utf-8")),
+        filename=f"backup_{today_str}.csv",
+        caption=f"📦 CSV backup — {stats['total']} прогнозов",
+    )
+    await update.message.reply_document(
+        document=io.BytesIO(json_data.encode("utf-8")),
+        filename=f"backup_{today_str}.json",
+        caption=f"📦 JSON backup (полные данные)",
+    )
+
+
+async def cmd_resolveday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner-only: запустить auto-resolve вручную (опционально с датой)."""
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ Только владелец.")
+        return
+
+    try:
+        from auto_resolve import auto_resolve_predictions, resolve_one_day
+    except ImportError as e:
+        await update.message.reply_text(f"❌ Модуль не загружен: {e}")
+        return
+
+    await update.message.reply_text("⏳ Auto-resolve запущен — качаю результаты с Sofascore/HLTV...")
+
+    try:
+        if context.args and len(context.args) >= 1:
+            target = context.args[0]
+            resolved, total = resolve_one_day(target)
+            await update.message.reply_text(
+                f"✅ За {target}: разрешено {resolved} из {total} нерезолвенных прогнозов."
+            )
+        else:
+            resolved, total = auto_resolve_predictions(days_back=7)
+            await update.message.reply_text(
+                f"✅ За последние 7 дней: разрешено {resolved} из {total} нерезолвенных прогнозов.\n"
+                f"Теперь /stats покажет реальный hit-rate."
+            )
+    except Exception as e:
+        logger.exception("Auto-resolve error")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
+
+
 async def cmd_findpred(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Look up prediction ids by player/team name (today's predictions)."""
     user_id = update.effective_user.id
@@ -1128,7 +1187,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def post_init(app: Application):
-    """Set bot commands in Telegram menu."""
+    """Set bot commands in Telegram menu + start auto-resolve scheduler."""
     commands = [
         BotCommand("analyze", "📊 Полный анализ + PDF"),
         BotCommand("quick", "⚡ Быстрый анализ"),
@@ -1143,6 +1202,35 @@ async def post_init(app: Application):
         BotCommand("help", "❓ Помощь"),
     ]
     await app.bot.set_my_commands(commands)
+
+    # ── Auto-resolve scheduler — раз в день в 03:00 UTC ──
+    try:
+        from apscheduler.schedulers.asyncio import AsyncIOScheduler
+        from apscheduler.triggers.cron import CronTrigger
+        from auto_resolve import auto_resolve_predictions
+
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            auto_resolve_predictions,
+            CronTrigger(hour=3, minute=0),  # 03:00 UTC ежедневно
+            kwargs={"days_back": 7},
+            id="auto_resolve_daily",
+            replace_existing=True,
+        )
+        scheduler.start()
+        logger.info("✅ Auto-resolve scheduler запущен (ежедневно 03:00 UTC)")
+
+        # Триггерим разово при старте — резолвим старые незакрытые прогнозы
+        try:
+            resolved, total = auto_resolve_predictions(days_back=14)
+            logger.info(f"Startup auto-resolve: {resolved} из {total} закрыто")
+        except Exception as e:
+            logger.warning(f"Startup auto-resolve пропущен: {e}")
+
+    except ImportError as e:
+        logger.warning(f"Scheduler не загружен (apscheduler нет?): {e}")
+    except Exception as e:
+        logger.exception(f"Scheduler init failed: {e}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1185,6 +1273,8 @@ def main():
     app.add_handler(CommandHandler("stats", cmd_accuracy))  # alias
     app.add_handler(CommandHandler("setresult", cmd_setresult))
     app.add_handler(CommandHandler("findpred", cmd_findpred))
+    app.add_handler(CommandHandler("exportdb", cmd_exportdb))
+    app.add_handler(CommandHandler("resolveday", cmd_resolveday))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("results", cmd_results))

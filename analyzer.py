@@ -448,6 +448,17 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
         # raw fallback — don't touch, just normalize H2H if present
         return data
 
+    # ── 0) Grass-calibration (7 правок от Accuracy Audit 18.06.2026) ──
+    # Применяем ДО основной валидации — чтобы дальнейшие проверки видели
+    # уже скорректированную probability.
+    try:
+        from grass_calibration import apply_grass_calibration
+        data, _grass_fixes = apply_grass_calibration(data, sport)
+    except ImportError:
+        logger.debug("grass_calibration module not available, skipping")
+    except Exception as e:
+        logger.warning(f"Grass calibration failed: {e}")
+
     # ── 1) H2H / map_veto / player_status normalization ────────────────
     if "h2h" in data and not isinstance(data["h2h"], str):
         data["h2h"] = _dict_to_text(data["h2h"])
