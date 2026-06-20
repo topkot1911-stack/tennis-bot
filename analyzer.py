@@ -417,11 +417,35 @@ def _net_factor_shift_for_fav(factors, fav_name: str, dog_name: str) -> float:
     Sum factor shifts and return the net pull toward `fav_name`.
       +N → factors agree fav should win
       -N → factors contradict (they actually favour the underdog)
+
+    Matches by:
+      1. Full name (e.g. "Alexander Zverev" in "+3% Alexander Zverev")
+      2. Last name fallback (e.g. "Zverev" in "+3% Zverev")
+      3. First initial + last name (e.g. "А. Зверев" in "+3% Зверев")
+
+    This catches the common Claude pattern where header uses full name
+    "Taylor Фриц" but factor shifts use only "Фриц".
     """
     if not isinstance(factors, list):
         return 0.0
-    fav_low = fav_name.lower() if fav_name else ""
-    dog_low = dog_name.lower() if dog_name else ""
+
+    def _name_variants(full_name: str) -> list:
+        """Generate [full, last_word, first_initial+last] variants for matching."""
+        if not full_name:
+            return []
+        full_low = full_name.lower().strip()
+        variants = [full_low]
+        words = full_low.replace(".", " ").split()
+        if len(words) >= 2:
+            # Last word (фамилия) — главный fallback
+            last_word = words[-1]
+            if len(last_word) >= 3:  # avoid matching "a", "de", etc.
+                variants.append(last_word)
+        return variants
+
+    fav_variants = _name_variants(fav_name)
+    dog_variants = _name_variants(dog_name)
+
     net = 0.0
     for f in factors:
         if not isinstance(f, dict):
@@ -429,11 +453,25 @@ def _net_factor_shift_for_fav(factors, fav_name: str, dog_name: str) -> float:
         shift_text = str(f.get("shift", ""))
         val = _parse_shift_pct(shift_text)
         text_low = shift_text.lower()
-        if fav_low and fav_low in text_low:
+
+        fav_match = any(v and v in text_low for v in fav_variants)
+        dog_match = any(v and v in text_low for v in dog_variants)
+
+        # If both match (rare — e.g. one player has another's name as substring),
+        # prefer the LONGER match (full name beats last-name).
+        if fav_match and dog_match:
+            fav_best = max((len(v) for v in fav_variants if v in text_low), default=0)
+            dog_best = max((len(v) for v in dog_variants if v in text_low), default=0)
+            if fav_best >= dog_best:
+                net += val
+            else:
+                net -= val
+        elif fav_match:
             net += val
-        elif dog_low and dog_low in text_low:
+        elif dog_match:
             net -= val
         # else: neutral / "обоим" / unclear
+
     return net
 
 
