@@ -165,6 +165,54 @@ def save_prediction(p1, p2, prob, fav, tournament, confidence, sport="tennis"):
                 return pid
 
 
+def get_locks(min_prob: float = 0.90, days: int = 1) -> list:
+    """
+    Возвращает «уверенные прогнозы» (≥ min_prob) за последние `days`.
+    Owner-only функция — для приватного использования /locks.
+
+    Returns:
+        Список прогнозов отсортированных по prob DESC
+    """
+    cutoff = (date.today() - timedelta(days=days - 1)).isoformat()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, date::text AS date, p1, p2, fav, prob, tournament,
+                       sport, outcome, created_at
+                FROM predictions
+                WHERE date >= %s AND prob >= %s
+                ORDER BY prob DESC, date DESC
+            """, (cutoff, min_prob))
+            rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_locks_accuracy(min_prob: float = 0.90, days: int = 30) -> dict:
+    """
+    Подсчёт точности «локов» — насколько модель честна когда уверена ≥ min_prob.
+    """
+    cutoff = (date.today() - timedelta(days=days)).isoformat()
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT prob, outcome FROM predictions
+                WHERE date >= %s AND prob >= %s AND outcome IS NOT NULL
+            """, (cutoff, min_prob))
+            rows = cur.fetchall()
+
+    total = len(rows)
+    if total == 0:
+        return {"total": 0, "correct": 0, "hit_rate": None, "min_prob": min_prob}
+    correct = sum(1 for r in rows if r["outcome"] == 1)
+    return {
+        "total": total,
+        "correct": correct,
+        "hit_rate": round(correct / total, 3),
+        "min_prob": min_prob,
+        "days": days,
+    }
+
+
 def set_outcome(prediction_id: int, fav_won: bool) -> bool:
     """Помечает прогноз как разрешённый. Возвращает True если строка обновилась."""
     with _conn() as conn:

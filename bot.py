@@ -927,6 +927,56 @@ async def cmd_setresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Прогноз #{pid} не найден.")
 
 
+async def cmd_locks(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Owner-only: показать «ВВ Локи» — прогнозы с уверенностью ≥ 90%.
+    /locks         — на сегодня
+    /locks 7       — за последние 7 дней
+    /locks 7 85    — за 7 дней с порогом 85% (тестирование)
+    """
+    user_id = update.effective_user.id
+    if user_id != OWNER_ID:
+        await update.message.reply_text("⛔ ВВ-Локи — только для владельца.")
+        return
+
+    args = context.args
+    days = int(args[0]) if args and args[0].isdigit() else 1
+    min_prob = (float(args[1]) / 100) if len(args) > 1 and args[1].isdigit() else 0.90
+
+    locks = db.get_locks(min_prob=min_prob, days=days)
+    accuracy = db.get_locks_accuracy(min_prob=min_prob, days=max(days, 30))
+
+    if not locks:
+        await update.message.reply_text(
+            f"🔒 ВВ-ЛОКИ ({int(min_prob*100)}%+, {days} дн.)\n\n"
+            f"Сегодня нет прогнозов выше {int(min_prob*100)}%.\n\n"
+            f"Историческая точность локов: "
+            f"{accuracy['correct']}/{accuracy['total']} = "
+            f"{int((accuracy['hit_rate'] or 0)*100)}% за 30 дней."
+        )
+        return
+
+    lines = [f"🔒 <b>ВВ-ЛОКИ</b> ({int(min_prob*100)}%+, {days} дн.)\n"]
+    for lk in locks[:10]:
+        status = "✅" if lk["outcome"] == 1 else ("❌" if lk["outcome"] == 0 else "⏳")
+        sport_icon = "🎾" if lk["sport"] == "tennis" else ("🎮" if lk["sport"] == "cs2" else "⚔️")
+        lines.append(
+            f"{status} {sport_icon} <b>{lk['fav']}</b> ({int(lk['prob']*100)}%) "
+            f"vs {lk['p2'] if lk['fav'] == lk['p1'] else lk['p1']}\n"
+            f"   <i>{lk.get('tournament', '?')[:40]}</i>\n"
+            f"   #ID{lk['id']} · {lk['date']}"
+        )
+
+    if accuracy["total"] > 0:
+        lines.append(
+            f"\n📊 <b>Точность локов</b> за 30 дн: "
+            f"{accuracy['correct']}/{accuracy['total']} = "
+            f"<b>{int(accuracy['hit_rate']*100)}%</b>"
+        )
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
 async def cmd_exportdb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Owner-only: send full database backup (CSV + JSON) to private chat."""
     user_id = update.effective_user.id
@@ -1275,6 +1325,7 @@ def main():
     app.add_handler(CommandHandler("findpred", cmd_findpred))
     app.add_handler(CommandHandler("exportdb", cmd_exportdb))
     app.add_handler(CommandHandler("resolveday", cmd_resolveday))
+    app.add_handler(CommandHandler("locks", cmd_locks))
     app.add_handler(PreCheckoutQueryHandler(pre_checkout_handler))
     app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_handler))
     app.add_handler(CommandHandler("results", cmd_results))
