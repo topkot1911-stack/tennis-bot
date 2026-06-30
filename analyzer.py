@@ -1279,6 +1279,26 @@ def format_summary(data: dict) -> str:
     lines.append("<i>(игроки, мотивация, форма, травмы, факторы, сценарии)</i>")
     lines.append("")
 
+    # — Уверенность прогноза —
+    confidence = data.get("confidence", "")
+    if confidence:
+        # Если строка длинная — берём только первое слово/фразу до запятой
+        conf_short = str(confidence).split(",")[0].split(".")[0].strip()
+        # Эмодзи в зависимости от уровня уверенности
+        conf_lower = conf_short.lower()
+        if "очень высок" in conf_lower or "максимал" in conf_lower:
+            emoji = "🟢🟢"
+        elif "высок" in conf_lower:
+            emoji = "🟢"
+        elif "средн" in conf_lower or "умеренн" in conf_lower:
+            emoji = "🟡"
+        elif "низк" in conf_lower:
+            emoji = "🔴"
+        else:
+            emoji = "📌"
+        lines.append(f"{emoji} <b>Уверенность прогноза:</b> {conf_short.upper()}")
+        lines.append("")
+
     # — Дисклеймер —
     lines.append("⚠️ <i>Исследовательский анализ, не рекомендация по ставкам</i>")
 
