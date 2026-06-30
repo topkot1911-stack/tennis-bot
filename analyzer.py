@@ -740,6 +740,207 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
 # MATHEMATICAL MODEL (Bo3 / Bo5)
 # ═══════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════
+# TOTAL GAMES + HANDICAP — точная модель распределения
+# ═══════════════════════════════════════════════════════════
+
+def _derive_p_set(p_match: float, bo: int) -> float:
+    """
+    Численно выводит вероятность выигрыша сета (p_set) из вероятности
+    выигрыша матча (p_match) методом бисекции.
+
+    Bo3:  P(win) = p² × (3 - 2p)
+    Bo5:  P(win) = p³ × (1 + 3(1-p) + 6(1-p)²)
+    """
+    p_match = max(0.5, min(0.99, p_match))
+    lo, hi = 0.5, 0.99
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        if bo == 5:
+            p_win = mid**3 * (1 + 3 * (1 - mid) + 6 * (1 - mid)**2)
+        else:
+            p_win = mid**2 * (3 - 2 * mid)
+        if p_win < p_match:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _set_score_distribution(p_set: float) -> dict:
+    """
+    Эмпирическое распределение счёта сета — сколько геймов проигравший
+    взял в выигранном победителем сете.
+
+    Ключи 0-6 (6-0, 6-1, ..., 7-6).
+    Значения — вероятности (сумма = 1).
+    """
+    # Калибровано на ATP main tour grass-statistics
+    if p_set >= 0.85:
+        return {0: 0.10, 1: 0.20, 2: 0.25, 3: 0.22, 4: 0.16, 5: 0.05, 6: 0.02}
+    elif p_set >= 0.75:
+        return {0: 0.06, 1: 0.15, 2: 0.22, 3: 0.25, 4: 0.18, 5: 0.09, 6: 0.05}
+    elif p_set >= 0.65:
+        return {0: 0.03, 1: 0.10, 2: 0.15, 3: 0.22, 4: 0.25, 5: 0.13, 6: 0.12}
+    elif p_set >= 0.55:
+        return {0: 0.02, 1: 0.06, 2: 0.10, 3: 0.18, 4: 0.27, 5: 0.18, 6: 0.19}
+    else:  # ~0.5
+        return {0: 0.01, 1: 0.04, 2: 0.08, 3: 0.13, 4: 0.28, 5: 0.21, 6: 0.25}
+
+
+def _expected_games_per_set(p_set: float) -> tuple:
+    """E(games) и Var(games) на один сет когда вероятность выиграть = p_set."""
+    dist = _set_score_distribution(p_set)
+    # Геймов в сете: 6+k если 6-k, либо 13 если 7-6 (k=6)
+    e_g = 0.0
+    for k, prob in dist.items():
+        games_in_set = 13 if k == 6 else 6 + k
+        e_g += games_in_set * prob
+    var_g = 0.0
+    for k, prob in dist.items():
+        games_in_set = 13 if k == 6 else 6 + k
+        var_g += prob * (games_in_set - e_g)**2
+    return e_g, var_g
+
+
+def _normal_cdf(x: float, mu: float, sigma: float) -> float:
+    """CDF нормального распределения."""
+    import math
+    if sigma <= 0:
+        return 1.0 if x >= mu else 0.0
+    z = (x - mu) / sigma
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def compute_totals_and_handicap(p_match: float, bo: int, distribution: dict) -> dict:
+    """
+    Точная модель тоталов и фор.
+
+    Возвращает:
+      - totals: список словарей {line, p_over, p_under}
+      - handicaps: список словарей {line, p_cover}
+    """
+    p_set_fav = _derive_p_set(p_match, bo)
+    p_set_dog = 1 - p_set_fav
+
+    # Ожидаемое число геймов и вариация на один сет
+    e_g_fav, var_g_fav = _expected_games_per_set(p_set_fav)
+    e_g_dog, var_g_dog = _expected_games_per_set(p_set_dog)
+
+    # Средний gain on set (для каждой стороны): когда сет выигран p_set_fav силой
+    e_avg_per_set = (p_set_fav * e_g_fav + p_set_dog * e_g_dog)
+    var_avg_per_set = (p_set_fav * var_g_fav + p_set_dog * var_g_dog +
+                       p_set_fav * (e_g_fav - e_avg_per_set)**2 +
+                       p_set_dog * (e_g_dog - e_avg_per_set)**2)
+
+    # Ожидаемое число сетов сыгранных
+    if bo == 5:
+        # Сценарии: 3-0(3 сетов), 3-1(4), 3-2(5), 0-3(3), 1-3(4), 2-3(5)
+        scenarios = [
+            (3, distribution.get('3-0', 0) + distribution.get('0-3', 0)),
+            (4, distribution.get('3-1', 0) + distribution.get('1-3', 0)),
+            (5, distribution.get('3-2', 0) + distribution.get('2-3', 0)),
+        ]
+    else:  # bo=3
+        scenarios = [
+            (2, distribution.get('2-0', 0) + distribution.get('0-2', 0)),
+            (3, distribution.get('2-1', 0) + distribution.get('1-2', 0)),
+        ]
+    total_prob = sum(p for _, p in scenarios) or 1
+    scenarios = [(n, p / total_prob) for n, p in scenarios]
+
+    # Распределение полного тотала: смесь нормальных для разного числа сетов
+    # Каждый сценарий: N(n_sets × e_avg_per_set, n_sets × var_avg_per_set)
+    import math
+    mixed_mu = sum(n * e_avg_per_set * p for n, p in scenarios)
+    # Для смешанного распределения: var = Σ p_i × (var_i + (mu_i - mu)²)
+    mixed_var = 0.0
+    for n, p in scenarios:
+        mu_i = n * e_avg_per_set
+        var_i = n * var_avg_per_set
+        mixed_var += p * (var_i + (mu_i - mixed_mu)**2)
+    mixed_sigma = math.sqrt(max(mixed_var, 1.0))
+
+    # ── ТОТАЛЫ ──
+    # Берём 3 линии: близкая, основная, дальняя
+    main_line = round(mixed_mu * 2) / 2  # ближайшие .5
+    # Подгоняем линию под популярные значения (xx.5)
+    if main_line == int(main_line):
+        main_line += 0.5
+    lines_to_check = [
+        main_line - 3.5,
+        main_line - 0.5,
+        main_line + 2.5,
+    ]
+
+    totals = []
+    for line in lines_to_check:
+        p_over = 1 - _normal_cdf(line, mixed_mu, mixed_sigma)
+        p_under = 1 - p_over
+        totals.append({
+            "line": line,
+            "p_over": round(p_over * 100),
+            "p_under": round(p_under * 100),
+        })
+
+    # ── ФОРА ПО СЕТАМ ──
+    # В Bo5: фора -1.5 (фаворит > 1 сет преимущество)
+    #        фора -2.5 (фав > 2 сета — значит 3-0)
+    # В Bo3: фора -1.5 (фаворит 2-0)
+    handicaps_sets = []
+    if bo == 5:
+        # -1.5 sets: fav wins by at least 2 sets → 3-0 or 3-1
+        p_h15 = distribution.get('3-0', 0) + distribution.get('3-1', 0)
+        # -2.5 sets: fav wins by 3 sets → 3-0
+        p_h25 = distribution.get('3-0', 0)
+        handicaps_sets.append({"line": -1.5, "type": "sets", "p_cover": round(p_h15 * 100)})
+        handicaps_sets.append({"line": -2.5, "type": "sets", "p_cover": round(p_h25 * 100)})
+    else:
+        # -1.5 sets in Bo3: fav wins 2-0
+        p_h15 = distribution.get('2-0', 0)
+        handicaps_sets.append({"line": -1.5, "type": "sets", "p_cover": round(p_h15 * 100)})
+
+    # ── ФОРА ПО ГЕЙМАМ ──
+    # Распределение РАЗНИЦЫ геймов = N(fav_score - dog_score)
+    # Среднее: (p_set_fav - p_set_dog) × n_sets × avg_games_per_set
+    # Берём более точно — через сценарии
+    e_diff = 0.0
+    var_diff = 0.0
+    for n_sets, prob in scenarios:
+        # При n сетах: разница ≈ (2×p_set_fav - 1) × n × e_avg
+        e_diff_i = (2 * p_set_fav - 1) * n_sets * e_avg_per_set
+        var_diff_i = n_sets * var_avg_per_set * 4 * p_set_fav * p_set_dog
+        e_diff += prob * e_diff_i
+        var_diff += prob * (var_diff_i + (e_diff_i - e_diff)**2)
+    sigma_diff = math.sqrt(max(var_diff, 1.0))
+
+    handicaps_games = []
+    # Берём диапазон линий и выбираем 2 самых информативных (40-85% покрытия)
+    candidate_lines = [-1.5, -2.5, -3.5, -4.5, -5.5, -6.5, -7.5, -8.5, -10.5]
+    raw = []
+    for h_line in candidate_lines:
+        p_cover = 1 - _normal_cdf(-h_line, e_diff, sigma_diff)
+        raw.append({
+            "line": h_line,
+            "type": "games",
+            "p_cover": round(p_cover * 100),
+        })
+    # Отбираем те где покрытие 40-85% (самые интересные для ставки)
+    informative = [h for h in raw if 40 <= h["p_cover"] <= 85]
+    # Если ни одной — возвращаем все ≤85%
+    if not informative:
+        informative = [h for h in raw if h["p_cover"] <= 85]
+    handicaps_games = informative[:2]  # топ-2
+
+    return {
+        "totals": totals,
+        "handicaps_sets": handicaps_sets,
+        "handicaps_games": handicaps_games,
+        "e_total_precise": round(mixed_mu, 1),
+        "sigma_total": round(mixed_sigma, 2),
+    }
+
+
 _GRAND_SLAM_KEYWORDS = (
     "wimbledon", "уимблдон", "уимблдона",
     "roland garros", "ролан гаррос", "french open", "ролан",
@@ -1035,34 +1236,42 @@ def format_summary(data: dict) -> str:
     lines.append(f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {fav.get('name','?')} — <b>{fav_pct}%</b>")
     lines.append("")
 
+    # — Точная модель тоталов и форы —
+    try:
+        market = compute_totals_and_handicap(p, bo, dist)
+    except Exception as _e:
+        logger.warning(f"Market model failed: {_e}")
+        market = None
+
     # — ТОТАЛ ГЕЙМОВ —
-    # Берём E(total) и считаем 3 диапазона: <line, ≈line, >line
-    e_total = dist.get("e_total", 0) or 0
-    if e_total and isinstance(e_total, (int, float)):
-        # Округляем до 0.5 шага
-        line_main = round(e_total * 2) / 2  # ближайшее .0 или .5
-        line_under = line_main - 2.5
-        line_over = line_main + 2.5
-        # Грубая модель распределения вокруг E(total):
-        # ±2.5 ≈ 25% / 50% / 25% (нормальное)
+    if market and market.get("totals"):
         lines.append(f"📊 <b>ТОТАЛ ГЕЙМОВ:</b>")
-        lines.append(f"  • Меньше {line_under:.1f} — <b>22%</b>")
-        lines.append(f"  • {line_under:.1f}–{line_over:.1f} — <b>55%</b>")
-        lines.append(f"  • Больше {line_over:.1f} — <b>23%</b>")
+        for t in market["totals"]:
+            line = t["line"]
+            p_over = t["p_over"]
+            p_under = t["p_under"]
+            # Показываем сторону которая чаще выпадает
+            if p_over >= p_under:
+                lines.append(f"  • Больше {line:.1f} — <b>{p_over}%</b>")
+            else:
+                lines.append(f"  • Меньше {line:.1f} — <b>{p_under}%</b>")
+        lines.append(f"  <i>E(total) = {market.get('e_total_precise', '?')} ± {market.get('sigma_total', '?')}</i>")
         lines.append("")
 
     # — ФОРА —
-    handicap = dist.get("handicap", 0) or 0
-    if handicap and isinstance(handicap, (int, float)):
-        # Главная фора фаворита
-        line_main = -round(handicap * 2) / 2  # отрицательная (фаворит даёт)
-        line_close = line_main + 1.5  # ближе к 0 (легче для фаворита)
-        # Грубая модель: при P=fav_pct/100
-        p_main = fav_pct * 0.85 / 100  # фаворит пройдёт основную фору
-        p_close = min(0.95, fav_pct / 100 + 0.08)  # ближнюю — почти всегда
-        lines.append(f"⚖️ <b>ФОРА ({fav.get('name','?').split()[-1]}):</b>")
-        lines.append(f"  • {line_close:+.1f} — <b>{round(p_close*100)}%</b>")
-        lines.append(f"  • {line_main:+.1f} — <b>{round(p_main*100)}%</b>")
+    fav_last = fav.get('name', '?').split()[-1] if fav.get('name') else '?'
+    if market:
+        lines.append(f"⚖️ <b>ФОРА ({fav_last}):</b>")
+        # По сетам
+        for h in market.get("handicaps_sets", []):
+            lines.append(f"  • {h['line']:+.1f} сетов — <b>{h['p_cover']}%</b>")
+        # По геймам — топ-2 разумных
+        games_filtered = [
+            h for h in market.get("handicaps_games", [])
+            if 5 <= h["p_cover"] <= 95
+        ][:2]
+        for h in games_filtered:
+            lines.append(f"  • {h['line']:+.1f} геймов — <b>{h['p_cover']}%</b>")
         lines.append("")
 
     # — Подсказка про PDF —
