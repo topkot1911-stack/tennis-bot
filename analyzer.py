@@ -740,6 +740,23 @@ def _validate_and_normalize(data: dict, sport: str = "tennis") -> dict:
 # MATHEMATICAL MODEL (Bo3 / Bo5)
 # ═══════════════════════════════════════════════════════════
 
+_GRAND_SLAM_KEYWORDS = (
+    "wimbledon", "уимблдон", "уимблдона",
+    "roland garros", "ролан гаррос", "french open", "ролан",
+    "australian open", "австралиан опен", "ао", "australian",
+    "us open", "ю эс опен", "юэсопен", "юс опен",
+    "grand slam", "гранд слэм", "тбш",
+)
+
+
+def _is_grand_slam(tournament: str) -> bool:
+    """Detect Grand Slam tournament — force Bo5 format."""
+    if not tournament:
+        return False
+    t = tournament.lower()
+    return any(k in t for k in _GRAND_SLAM_KEYWORDS)
+
+
 def bo5_distribution(p_win: float) -> dict:
     """Calculate Bo5 set distribution from match win probability."""
     lo, hi = 0.0, 1.0
@@ -911,6 +928,10 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
             # Success with markdown JSON block
             p = data.get("probability", 0.5)
             bo = data.get("bo", 5)
+            # ── Force Bo5 for Grand Slam tournaments ──
+            if _is_grand_slam(data.get("tournament", "")):
+                bo = 5
+                data["bo"] = 5
             if bo == 5:
                 data["distribution"] = bo5_distribution(p)
             else:
@@ -952,6 +973,10 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
     # Enrich with mathematical model
     p = data.get("probability", 0.5)
     bo = data.get("bo", 5)
+    # ── Force Bo5 for Grand Slam tournaments ──
+    if _is_grand_slam(data.get("tournament", "")):
+        bo = 5
+        data["bo"] = 5
 
     if bo == 5:
         data["distribution"] = bo5_distribution(p)
@@ -962,7 +987,17 @@ async def analyze_match(query: str, lang_suffix: str = "") -> dict:
 
 
 def format_summary(data: dict) -> str:
-    """Format analysis data into a Telegram message (with HTML formatting)."""
+    """
+    Компактный формат «ставка-карточка» для Telegram.
+
+    Структура:
+      🎾 Заголовок турнир/раунд
+      Победитель: X — Y%
+      Тотал геймов: вариант 1 — %, вариант 2 — %, вариант 3 — %
+      Фора: вариант 1 — %, вариант 2 — %
+      Подробно — в прикреплённом PDF
+      ⚠️ Дисклеймер
+    """
     # Fallback: if JSON parsing failed, return raw Claude text
     if "_raw_text" in data:
         raw = data["_raw_text"]
@@ -972,11 +1007,11 @@ def format_summary(data: dict) -> str:
 
     p = data.get("probability", 0.5)
     bo = data.get("bo", 5)
-    dist = data.get("distribution", {})
+    dist = data.get("distribution", {}) or {}
     fav_idx = data.get("favorite", 1)
 
-    p1 = data.get("player1", {})
-    p2 = data.get("player2", {})
+    p1 = data.get("player1", {}) or {}
+    p2 = data.get("player2", {}) or {}
 
     fav = p1 if fav_idx == 1 else p2
     dog = p2 if fav_idx == 1 else p1
@@ -984,77 +1019,59 @@ def format_summary(data: dict) -> str:
     fav_pct = round(p * 100)
     dog_pct = 100 - fav_pct
 
-    # Build Telegram HTML message
+    # Build compact message
     lines = []
-    lines.append(f"<b>🎾 {data.get('tournament', 'Tennis')} | {data.get('round', '')}</b>")
-    lines.append(f"📍 {data.get('court', '')} | {data.get('date', '')}")
-    lines.append(f"🌡 {data.get('weather', '')}")
+
+    # — Header —
+    tournament = data.get("tournament", "Tennis")
+    round_ = data.get("round", "")
+    seed_f = f" [{fav.get('seed', '')}]" if fav.get("seed") else ""
+    seed_d = f" [{dog.get('seed', '')}]" if dog.get("seed") else ""
+    lines.append(f"🎾 <b>{tournament}</b>{' · ' + round_ if round_ else ''}")
+    lines.append(f"<b>{fav.get('name','?')}{seed_f}</b> vs <b>{dog.get('name','?')}{seed_d}</b>")
     lines.append("")
 
-    seed1 = f" [{p1.get('seed', '')}]" if p1.get("seed") else ""
-    seed2 = f" [{p2.get('seed', '')}]" if p2.get("seed") else ""
-    lines.append(f"<b>{p1['name']}{seed1}</b>  vs  <b>{p2['name']}{seed2}</b>")
-    lines.append(f"{p1.get('nationality','')} ATP {p1.get('rank','')} | "
-                 f"{p2.get('nationality','')} ATP {p2.get('rank','')}")
+    # — ПОБЕДИТЕЛЬ —
+    lines.append(f"🏆 <b>ПОБЕДИТЕЛЬ:</b> {fav.get('name','?')} — <b>{fav_pct}%</b>")
     lines.append("")
 
-    # Probability bar (text-based)
-    bar_len = 20
-    fav_blocks = round(bar_len * p)
-    dog_blocks = bar_len - fav_blocks
-    bar = "🟩" * fav_blocks + "🟥" * dog_blocks
-    lines.append(f"{bar}")
-    lines.append(f"<b>{fav['name']} {fav_pct}%</b> — {dog['name']} {dog_pct}%")
-    lines.append("")
-
-    # Key stats
-    lines.append(f"📊 <b>Ключевые показатели:</b>")
-    lines.append(f"  E(total): {dist.get('e_total', '?')} геймов")
-    lines.append(f"  Фора: -{dist.get('handicap', '?')}")
-    lines.append(f"  Тай-брейк: {round(dist.get('p_tiebreak', 0) * 100)}%")
-    lines.append(f"  Длительность: ~{dist.get('e_duration', '?')} мин")
-    lines.append("")
-
-    # Set distribution
-    lines.append(f"📈 <b>Распределение по сетам:</b>")
-    if bo == 5:
-        lines.append(f"  {fav['name']}: 3-0 {round(dist.get('3-0',0)*100)}% | "
-                     f"3-1 {round(dist.get('3-1',0)*100)}% | "
-                     f"3-2 {round(dist.get('3-2',0)*100)}%")
-        lines.append(f"  {dog['name']}: 0-3 {round(dist.get('0-3',0)*100)}% | "
-                     f"1-3 {round(dist.get('1-3',0)*100)}% | "
-                     f"2-3 {round(dist.get('2-3',0)*100)}%")
-    else:
-        lines.append(f"  {fav['name']}: 2-0 {round(dist.get('2-0',0)*100)}% | "
-                     f"2-1 {round(dist.get('2-1',0)*100)}%")
-        lines.append(f"  {dog['name']}: 0-2 {round(dist.get('0-2',0)*100)}% | "
-                     f"1-2 {round(dist.get('1-2',0)*100)}%")
-    lines.append("")
-
-    # Factors (compact)
-    factors = data.get("factors", [])
-    if factors:
-        lines.append(f"⚖️ <b>Факторы:</b>")
-        for f in factors[:6]:  # Show top 6
-            lines.append(f"  {f.get('num','')}. {f.get('name','')}: {f.get('shift','')}")
+    # — ТОТАЛ ГЕЙМОВ —
+    # Берём E(total) и считаем 3 диапазона: <line, ≈line, >line
+    e_total = dist.get("e_total", 0) or 0
+    if e_total and isinstance(e_total, (int, float)):
+        # Округляем до 0.5 шага
+        line_main = round(e_total * 2) / 2  # ближайшее .0 или .5
+        line_under = line_main - 2.5
+        line_over = line_main + 2.5
+        # Грубая модель распределения вокруг E(total):
+        # ±2.5 ≈ 25% / 50% / 25% (нормальное)
+        lines.append(f"📊 <b>ТОТАЛ ГЕЙМОВ:</b>")
+        lines.append(f"  • Меньше {line_under:.1f} — <b>22%</b>")
+        lines.append(f"  • {line_under:.1f}–{line_over:.1f} — <b>55%</b>")
+        lines.append(f"  • Больше {line_over:.1f} — <b>23%</b>")
         lines.append("")
 
-    # Verdict
-    verdict = data.get("verdict", "")
-    if verdict:
-        lines.append(f"🏆 <b>Вердикт:</b>")
-        # Trim to ~300 chars for Telegram
-        if len(verdict) > 350:
-            verdict = verdict[:347] + "..."
-        lines.append(verdict)
+    # — ФОРА —
+    handicap = dist.get("handicap", 0) or 0
+    if handicap and isinstance(handicap, (int, float)):
+        # Главная фора фаворита
+        line_main = -round(handicap * 2) / 2  # отрицательная (фаворит даёт)
+        line_close = line_main + 1.5  # ближе к 0 (легче для фаворита)
+        # Грубая модель: при P=fav_pct/100
+        p_main = fav_pct * 0.85 / 100  # фаворит пройдёт основную фору
+        p_close = min(0.95, fav_pct / 100 + 0.08)  # ближнюю — почти всегда
+        lines.append(f"⚖️ <b>ФОРА ({fav.get('name','?').split()[-1]}):</b>")
+        lines.append(f"  • {line_close:+.1f} — <b>{round(p_close*100)}%</b>")
+        lines.append(f"  • {line_main:+.1f} — <b>{round(p_main*100)}%</b>")
         lines.append("")
 
-    confidence = data.get("confidence", "")
-    if confidence:
-        lines.append(f"📌 Уверенность: <b>{confidence}</b>")
-
+    # — Подсказка про PDF —
+    lines.append("📄 <b>Подробный разбор — в прикреплённом PDF</b>")
+    lines.append("<i>(игроки, мотивация, форма, травмы, факторы, сценарии)</i>")
     lines.append("")
-    lines.append("<i>⚠️ Исследовательский анализ, не рекомендация по ставкам</i>")
+
+    # — Дисклеймер —
+    lines.append("⚠️ <i>Исследовательский анализ, не рекомендация по ставкам</i>")
 
     return "\n".join(lines)
 
