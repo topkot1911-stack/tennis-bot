@@ -803,6 +803,28 @@ def _expected_games_per_set(p_set: float) -> tuple:
     return e_g, var_g
 
 
+def _set_advantage(p_set: float) -> float:
+    """
+    Среднее преимущество в геймах когда сет выигран.
+    (Победитель сета побеждает с разрывом X геймов в среднем)
+
+    p_set=0.85 → adv ~3.65 (доминирование)
+    p_set=0.70 → adv ~3.00 (комфорт)
+    p_set=0.55 → adv ~2.27 (близко)
+    """
+    dist = _set_score_distribution(p_set)
+    e_loser = 0.0
+    e_winner = 0.0
+    for k, prob in dist.items():
+        if k < 6:  # 6-k счёт
+            e_loser += k * prob
+            e_winner += 6 * prob
+        else:  # 7-6 TB
+            e_loser += 6 * prob
+            e_winner += 7 * prob
+    return e_winner - e_loser
+
+
 def _normal_cdf(x: float, mu: float, sigma: float) -> float:
     """CDF нормального распределения."""
     import math
@@ -901,16 +923,34 @@ def compute_totals_and_handicap(p_match: float, bo: int, distribution: dict) -> 
         handicaps_sets.append({"line": -1.5, "type": "sets", "p_cover": round(p_h15 * 100)})
 
     # ── ФОРА ПО ГЕЙМАМ ──
-    # Распределение РАЗНИЦЫ геймов = N(fav_score - dog_score)
-    # Среднее: (p_set_fav - p_set_dog) × n_sets × avg_games_per_set
-    # Берём более точно — через сценарии
+    # Распределение РАЗНИЦЫ геймов (fav_games - dog_games)
+    # ПРАВИЛЬНАЯ модель:
+    # - Когда fav выигрывает сет (вероятность p_set_fav): разница +adv_fav
+    # - Когда dog выигрывает сет (вероятность p_set_dog): разница -adv_dog
+    # E(разница в сете) = p_set_fav × adv_fav - p_set_dog × adv_dog
+    # Var(разница в сете) = E[X²] - E[X]²
+    adv_fav = _set_advantage(p_set_fav)
+    # Когда дог выигрывает сет — он underdog побеждает тесно, преимущество меньше
+    # Берём близкую к 0.55 модель (тесный сет)
+    adv_dog_when_wins = _set_advantage(max(0.55, p_set_dog))
+
+    e_diff_per_set = p_set_fav * adv_fav - p_set_dog * adv_dog_when_wins
+    # E[X²] = p_fav × adv_fav² + p_dog × adv_dog²
+    e_diff_sq_per_set = (p_set_fav * adv_fav**2 +
+                         p_set_dog * adv_dog_when_wins**2)
+    var_diff_per_set = e_diff_sq_per_set - e_diff_per_set**2
+
+    # Полная разница матча: смесь по числу сетов
     e_diff = 0.0
     var_diff = 0.0
     for n_sets, prob in scenarios:
-        # При n сетах: разница ≈ (2×p_set_fav - 1) × n × e_avg
-        e_diff_i = (2 * p_set_fav - 1) * n_sets * e_avg_per_set
-        var_diff_i = n_sets * var_avg_per_set * 4 * p_set_fav * p_set_dog
+        e_diff_i = n_sets * e_diff_per_set
+        var_diff_i = n_sets * var_diff_per_set
         e_diff += prob * e_diff_i
+    # Дисперсия смеси
+    for n_sets, prob in scenarios:
+        e_diff_i = n_sets * e_diff_per_set
+        var_diff_i = n_sets * var_diff_per_set
         var_diff += prob * (var_diff_i + (e_diff_i - e_diff)**2)
     sigma_diff = math.sqrt(max(var_diff, 1.0))
 
