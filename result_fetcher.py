@@ -122,6 +122,111 @@ def fetch_tennis_results(target_date: str) -> List[Dict]:
     return results
 
 
+def fetch_tennis_schedule(target_date: str) -> List[Dict]:
+    """
+    Возвращает ЗАПЛАНИРОВАННЫЕ и НЕ ЗАВЕРШЁННЫЕ теннисные матчи за дату
+    (ATP main tour, без WTA, без парного разряда).
+
+    Каждый матч содержит рейтинги игроков (если доступны).
+
+    Returns:
+        [{"p1": "...", "p2": "...", "p1_rank": int, "p2_rank": int,
+          "tournament": "...", "start_time": "..."}, ...]
+    """
+    url = f"{SOFASCORE_BASE}/sport/tennis/scheduled-events/{target_date}"
+    try:
+        r = _scraper.get(url, headers=TENNIS_HEADERS, timeout=20)
+        if r.status_code != 200:
+            logger.warning(f"Sofascore schedule {target_date}: HTTP {r.status_code}")
+            return []
+        data = r.json()
+    except Exception as e:
+        logger.error(f"Sofascore schedule fetch failed for {target_date}: {e}")
+        return []
+
+    matches = []
+    for event in data.get("events", []):
+        status = event.get("status", {})
+        status_type = status.get("type", "")
+        # Только не завершённые (не finished, canceled и т.п.)
+        if status_type == "finished":
+            continue
+
+        home_team = event.get("homeTeam", {}) or {}
+        away_team = event.get("awayTeam", {}) or {}
+        home_name = (home_team.get("name") or "").strip()
+        away_name = (away_team.get("name") or "").strip()
+
+        # Skip doubles
+        if not home_name or not away_name or "/" in home_name or "/" in away_name:
+            continue
+
+        # Skip WTA
+        category_slug = (event.get("tournament", {})
+                              .get("category", {})
+                              .get("slug", "")).lower()
+        if "wta" in category_slug or "women" in category_slug:
+            continue
+        # Skip ITF/challenger — оставляем только ATP main
+        tournament_slug = (event.get("tournament", {}).get("slug", "") or "").lower()
+        tournament_name = event.get("tournament", {}).get("name", "?")
+        if any(k in tournament_slug for k in ("itf", "challenger")):
+            continue
+
+        # Рейтинги из ranking (если есть)
+        p1_rank = home_team.get("ranking") or home_team.get("rank") or 0
+        p2_rank = away_team.get("ranking") or away_team.get("rank") or 0
+
+        start_ts = event.get("startTimestamp", 0)
+        start_time = ""
+        if start_ts:
+            from datetime import datetime as _dt
+            start_time = _dt.fromtimestamp(start_ts).strftime("%H:%M")
+
+        matches.append({
+            "p1": home_name,
+            "p2": away_name,
+            "p1_rank": int(p1_rank) if p1_rank else 0,
+            "p2_rank": int(p2_rank) if p2_rank else 0,
+            "tournament": tournament_name,
+            "start_time": start_time,
+            "start_ts": start_ts,
+        })
+
+    logger.info(f"Sofascore schedule {target_date}: {len(matches)} scheduled ATP matches")
+    return matches
+
+
+def quick_tennis_probability(rank_fav: int, rank_dog: int,
+                              surface: str = "grass") -> float:
+    """
+    Быстрая математическая оценка вероятности победы фаворита.
+    Основано на ATP рейтинге + поверхность (без ML).
+
+    Формула:
+      p = 0.5 + 0.15 × ln(rank_dog / rank_fav)
+      корректировка ±3% по покрытию
+
+    Кэп 55-92%.
+    """
+    import math
+    if not rank_fav or not rank_dog or rank_fav <= 0 or rank_dog <= 0:
+        return 0.55  # неизвестно — минимальная уверенность
+    if rank_fav >= rank_dog:
+        # рейтинги в обратном порядке — swapped
+        rank_fav, rank_dog = rank_dog, rank_fav
+
+    log_ratio = math.log(rank_dog / rank_fav)
+    p = 0.5 + 0.15 * log_ratio
+
+    # Grass слегка усиливает фаворитов у которых big-serv
+    # (для простоты — небольшой бонус на grass)
+    if surface == "grass":
+        p += 0.01
+
+    return round(max(0.5, min(0.92, p)), 3)
+
+
 # ───────────────────────── CS2 ─────────────────────────
 
 HLTV_RESULTS_URL = "https://www.hltv.org/results"

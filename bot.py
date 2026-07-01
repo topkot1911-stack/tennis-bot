@@ -932,9 +932,10 @@ async def cmd_locks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Owner-only: показать топ-выборы дня — прогнозы с уверенностью ≥ 75%.
 
     По умолчанию — только сегодня, порог 75%.
+    Если в БД нет прогнозов — АВТОСКАН расписания Sofascore.
 
     /locks         — на сегодня, 75%+ (default)
-    /locks 3       — за последние 3 дня
+    /locks 3       — за последние 3 дня из БД
     /locks 1 80    — сегодня с порогом 80%
     """
     user_id = update.effective_user.id
@@ -949,6 +950,106 @@ async def cmd_locks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     locks = db.get_locks(min_prob=min_prob, days=days)
     accuracy = db.get_locks_accuracy(min_prob=min_prob, days=30)
 
+    # ── Если БД пуста и это про сегодня — делаем автоскан ──
+    if not locks and days == 1:
+        await update.message.reply_text(
+            f"🔍 БД пуста за сегодня. Запускаю автоскан Sofascore...",
+        )
+        try:
+            from result_fetcher import fetch_tennis_schedule, quick_tennis_probability
+            from datetime import date as _date
+            today = _date.today().isoformat()
+            schedule = fetch_tennis_schedule(today)
+
+            if not schedule:
+                await update.message.reply_text(
+                    "❌ Не удалось получить расписание. "
+                    "Проверь /resolveday или сделай /analyze вручную."
+                )
+                return
+
+            # Считаем быструю вероятность для каждого матча
+            auto_picks = []
+            for m in schedule:
+                r1, r2 = m.get("p1_rank", 0), m.get("p2_rank", 0)
+                if not r1 or not r2 or r1 <= 0 or r2 <= 0:
+                    continue
+                # Определяем фаворита
+                if r1 < r2:
+                    fav, dog = m["p1"], m["p2"]
+                    rank_fav, rank_dog = r1, r2
+                else:
+                    fav, dog = m["p2"], m["p1"]
+                    rank_fav, rank_dog = r2, r1
+                # Определяем покрытие (grass если Wimbledon/Halle/Queens)
+                tour_low = m.get("tournament", "").lower()
+                surface = ("grass" if any(k in tour_low for k in
+                          ("wimbledon", "halle", "queen", "eastbourne",
+                           "mallorca", "hertogenbosch"))
+                          else "hard")
+                p = quick_tennis_probability(rank_fav, rank_dog, surface)
+                if p >= min_prob:
+                    auto_picks.append({
+                        "fav": fav,
+                        "dog": dog,
+                        "prob": p,
+                        "rank_fav": rank_fav,
+                        "rank_dog": rank_dog,
+                        "tournament": m.get("tournament", "?"),
+                        "start_time": m.get("start_time", ""),
+                        "sport": "tennis",
+                    })
+
+            auto_picks.sort(key=lambda x: -x["prob"])
+
+            if not auto_picks:
+                await update.message.reply_text(
+                    f"🎯 <b>АВТОСКАН — 0 матчей ≥{int(min_prob*100)}%</b>\n\n"
+                    f"В расписании {len(schedule)} матчей, но ни один "
+                    f"не достиг порога {int(min_prob*100)}% по quick-model.\n\n"
+                    f"<i>Попробуй понизить порог: /locks 1 65</i>",
+                    parse_mode=ParseMode.HTML
+                )
+                return
+
+            # Форматируем список
+            lines = [
+                f"🎯 <b>АВТОСКАН ТОП-ВЫБОРОВ ({int(min_prob*100)}%+)</b>",
+                f"<i>Быстрая модель по рейтингам ATP</i>",
+                "",
+            ]
+            for pick in auto_picks[:15]:
+                fav_short = str(pick["fav"])[:22]
+                dog_short = str(pick["dog"])[:18]
+                time_str = f" ⏰{pick['start_time']}" if pick.get('start_time') else ""
+                lines.append(
+                    f"🎾 <b>{fav_short}</b> — <b>{int(pick['prob']*100)}%</b>{time_str}"
+                )
+                lines.append(
+                    f"    vs {dog_short}  "
+                    f"[#{pick['rank_fav']} vs #{pick['rank_dog']}]"
+                )
+            lines.append("")
+            lines.append(
+                "<i>💡 Для точного анализа: /analyze [имя игрока]</i>"
+            )
+            lines.append("")
+            lines.append("⚠️ <i>Исследовательский анализ, не совет по ставкам</i>")
+
+            await update.message.reply_text(
+                "\n".join(lines), parse_mode=ParseMode.HTML
+            )
+            return
+
+        except Exception as e:
+            logger.exception("Auto-scan failed")
+            await update.message.reply_text(
+                f"❌ Автоскан не удался: {e}\n\n"
+                f"Сделай /analyze вручную для отдельных матчей."
+            )
+            return
+
+    # ── Иначе — если ничего нет в БД и days>1 ──
     if not locks:
         await update.message.reply_text(
             f"🎯 <b>ТОП-ВЫБОРЫ ({int(min_prob*100)}%+)</b>\n\n"
