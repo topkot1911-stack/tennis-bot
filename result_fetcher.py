@@ -11,28 +11,145 @@ Sofascore и HLTV защищены Cloudflare и блокируют просто
 """
 
 import logging
-import re
+import random
+import time
 from datetime import date, datetime, timedelta
+import re
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# cloudscraper handles Cloudflare 403 protection automatically.
-# Fallback to plain requests if cloudscraper не установлен.
+# ══════════════════════════════════════════════════════════════
+# ROTATING USER AGENTS + FINGERPRINTS
+# ══════════════════════════════════════════════════════════════
+# Пул из реальных User-Agents реальных браузеров — для ротации при
+# каждом запросе. Обновлено на актуальные версии.
+
+USER_AGENTS = [
+    # Chrome Desktop
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Safari
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15",
+    # Firefox
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.2; rv:122.0) Gecko/20100101 Firefox/122.0",
+    # Edge
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+    # Mobile
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
+]
+
+# curl_cffi поддерживает impersonation реальных браузеров на TLS-уровне
+# (JA3/JA4 fingerprints). Обходит Cloudflare, DataDome и другие anti-bot.
+try:
+    from curl_cffi import requests as cc_requests
+    _HAS_CURL_CFFI = True
+    logger.info("✅ curl_cffi загружен — TLS fingerprint impersonation активен")
+except ImportError:
+    _HAS_CURL_CFFI = False
+    logger.warning("⚠️ curl_cffi не установлен — только cloudscraper")
+
+# Cloudscraper — второй уровень защиты для JavaScript-challenge
 try:
     import cloudscraper
     _scraper = cloudscraper.create_scraper(
         browser={"browser": "chrome", "platform": "darwin", "mobile": False}
     )
     _USE_CLOUDSCRAPER = True
-    logger.info("✅ cloudscraper загружен — Cloudflare bypass активен")
+    logger.info("✅ cloudscraper загружен")
 except ImportError:
     import requests as _scraper_fallback
     _scraper = _scraper_fallback
     _USE_CLOUDSCRAPER = False
-    logger.warning("⚠️  cloudscraper не установлен — fallback на requests (403 likely)")
+    logger.warning("⚠️ cloudscraper не установлен")
 
 from bs4 import BeautifulSoup
+
+
+def _random_headers(extra: dict = None) -> dict:
+    """Возвращает свежие headers с случайным User-Agent."""
+    headers = {
+        "User-Agent": random.choice(USER_AGENTS),
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": random.choice([
+            "en-US,en;q=0.9",
+            "en-GB,en;q=0.9,en-US;q=0.8",
+            "en-US,en;q=0.9,ru;q=0.8",
+        ]),
+        "Accept-Encoding": "gzip, deflate, br",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
+        "Sec-Ch-Ua": '"Chromium";v="121", "Google Chrome";v="121", "Not?A_Brand";v="8"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": random.choice(['"macOS"', '"Windows"', '"Linux"']),
+    }
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def _fetch_with_rotation(url: str, max_retries: int = 3,
+                        extra_headers: dict = None) -> Optional[object]:
+    """
+    Пробует получить URL используя разные стратегии по очереди.
+    Каждая стратегия — свой набор fingerprints.
+
+    Returns:
+        response object или None если все стратегии упали
+    """
+    strategies = []
+
+    # Стратегия 1: curl_cffi с Chrome 120 impersonation (лучше всего для Cloudflare)
+    if _HAS_CURL_CFFI:
+        strategies.append(("curl_cffi-chrome120", lambda h:
+            cc_requests.get(url, impersonate="chrome120",
+                           headers=h, timeout=15)))
+        strategies.append(("curl_cffi-safari17", lambda h:
+            cc_requests.get(url, impersonate="safari17_0",
+                           headers=h, timeout=15)))
+        strategies.append(("curl_cffi-chrome110", lambda h:
+            cc_requests.get(url, impersonate="chrome110",
+                           headers=h, timeout=15)))
+
+    # Стратегия 2: cloudscraper (JavaScript challenge bypass)
+    if _USE_CLOUDSCRAPER:
+        strategies.append(("cloudscraper", lambda h: _scraper.get(url, headers=h, timeout=15)))
+
+    for name, fetch_fn in strategies:
+        for attempt in range(max_retries):
+            try:
+                headers = _random_headers(extra_headers)
+                r = fetch_fn(headers)
+                status = r.status_code
+                if status == 200:
+                    logger.info(f"✅ {name} attempt {attempt+1}: HTTP 200")
+                    return r
+                elif status in (429, 503):
+                    # Rate limited — exponential backoff
+                    sleep_s = 2 ** attempt + random.uniform(0.5, 1.5)
+                    logger.warning(f"{name}: HTTP {status}, sleeping {sleep_s:.1f}s")
+                    time.sleep(sleep_s)
+                    continue
+                elif status == 403:
+                    # Blocked — try next strategy
+                    logger.warning(f"{name} attempt {attempt+1}: HTTP 403 (blocked)")
+                    break
+                else:
+                    logger.warning(f"{name} attempt {attempt+1}: HTTP {status}")
+                    break
+            except Exception as e:
+                logger.warning(f"{name} attempt {attempt+1} exception: {e}")
+                time.sleep(1)
+
+    logger.error(f"All strategies failed for {url}")
+    return None
 
 # Реалистичные headers — даже cloudscraper выигрывает с правильными referrer/origin
 TENNIS_HEADERS = {
@@ -137,27 +254,46 @@ def fetch_tennis_schedule(target_date: str) -> List[Dict]:
         [{"p1": "...", "p2": "...", "p1_rank": int, "p2_rank": int,
           "tournament": "...", "start_time": "..."}, ...]
     """
-    # Источник 1: Sofascore
-    url = f"{SOFASCORE_BASE}/sport/tennis/scheduled-events/{target_date}"
+    # ── Пробуем МНОЖЕСТВО endpoints с TLS-fingerprint rotation ──
+    endpoints = [
+        f"https://api.sofascore.com/api/v1/sport/tennis/scheduled-events/{target_date}",
+        f"https://www.sofascore.com/api/v1/sport/tennis/scheduled-events/{target_date}",
+        f"https://api.sofascore.app/api/v1/sport/tennis/scheduled-events/{target_date}",
+    ]
+
     data = None
     error_msg = ""
-    try:
-        r = _scraper.get(url, headers=TENNIS_HEADERS, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            logger.info(f"Sofascore schedule {target_date}: HTTP 200, "
-                       f"{len(data.get('events', []))} events")
+    for endpoint in endpoints:
+        logger.info(f"Trying endpoint: {endpoint}")
+        # Referer подставляем под каждый endpoint
+        if "sofascore.com" in endpoint:
+            extra_h = {"Referer": "https://www.sofascore.com/",
+                       "Origin": "https://www.sofascore.com"}
         else:
-            error_msg = f"Sofascore HTTP {r.status_code}"
-            logger.warning(f"Sofascore schedule {target_date}: {error_msg}")
-    except Exception as e:
-        error_msg = f"Sofascore error: {e}"
-        logger.error(f"Sofascore schedule fetch failed for {target_date}: {e}")
+            extra_h = {"Referer": "https://www.sofascore.app/",
+                       "Origin": "https://www.sofascore.app"}
 
-    # Если Sofascore не сработал — используем ATP fallback
+        r = _fetch_with_rotation(endpoint, max_retries=2, extra_headers=extra_h)
+        if r is None:
+            continue
+
+        try:
+            data = r.json()
+            if data.get("events"):
+                logger.info(f"✅ {endpoint}: получили {len(data['events'])} events")
+                break
+            else:
+                logger.warning(f"{endpoint}: 200 но нет events")
+                data = None
+        except Exception as e:
+            logger.error(f"{endpoint}: JSON parse failed: {e}")
+            error_msg = f"JSON error: {e}"
+            continue
+
+    # Если ни один endpoint не сработал — используем hardcoded fallback
     if data is None:
-        logger.info(f"Пробуем ATP fallback для {target_date}...")
-        return _fetch_schedule_atp_fallback(target_date, error_msg)
+        logger.warning("Все endpoints недоступны, используем hardcoded fallback")
+        return _fetch_schedule_atp_fallback(target_date, error_msg or "all endpoints failed")
 
     matches = []
     for event in data.get("events", []):
