@@ -929,50 +929,73 @@ async def cmd_setresult(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_locks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Owner-only: показать «ВВ Локи» — прогнозы с уверенностью ≥ 90%.
-    /locks         — на сегодня
-    /locks 7       — за последние 7 дней
-    /locks 7 85    — за 7 дней с порогом 85% (тестирование)
+    Owner-only: показать топ-выборы дня — прогнозы с уверенностью ≥ 75%.
+
+    По умолчанию — только сегодня, порог 75%.
+
+    /locks         — на сегодня, 75%+ (default)
+    /locks 3       — за последние 3 дня
+    /locks 1 80    — сегодня с порогом 80%
     """
     user_id = update.effective_user.id
     if user_id != OWNER_ID:
-        await update.message.reply_text("⛔ ВВ-Локи — только для владельца.")
+        await update.message.reply_text("⛔ Только для владельца.")
         return
 
     args = context.args
     days = int(args[0]) if args and args[0].isdigit() else 1
-    min_prob = (float(args[1]) / 100) if len(args) > 1 and args[1].isdigit() else 0.90
+    min_prob = (float(args[1]) / 100) if len(args) > 1 and args[1].isdigit() else 0.75
 
     locks = db.get_locks(min_prob=min_prob, days=days)
-    accuracy = db.get_locks_accuracy(min_prob=min_prob, days=max(days, 30))
+    accuracy = db.get_locks_accuracy(min_prob=min_prob, days=30)
 
     if not locks:
         await update.message.reply_text(
-            f"🔒 ВВ-ЛОКИ ({int(min_prob*100)}%+, {days} дн.)\n\n"
-            f"Сегодня нет прогнозов выше {int(min_prob*100)}%.\n\n"
-            f"Историческая точность локов: "
-            f"{accuracy['correct']}/{accuracy['total']} = "
-            f"{int((accuracy['hit_rate'] or 0)*100)}% за 30 дней."
+            f"🎯 <b>ТОП-ВЫБОРЫ ({int(min_prob*100)}%+)</b>\n\n"
+            f"Пока нет прогнозов ≥{int(min_prob*100)}% за {days} дн.\n\n"
+            f"Сделай /analyze чтобы добавить матчи в базу.\n\n"
+            f"📊 Точность за 30 дн: "
+            f"<b>{accuracy['correct']}/{accuracy['total']} = "
+            f"{int((accuracy['hit_rate'] or 0)*100)}%</b>",
+            parse_mode=ParseMode.HTML
         )
         return
 
-    lines = [f"🔒 <b>ВВ-ЛОКИ</b> ({int(min_prob*100)}%+, {days} дн.)\n"]
-    for lk in locks[:10]:
-        status = "✅" if lk["outcome"] == 1 else ("❌" if lk["outcome"] == 0 else "⏳")
-        sport_icon = "🎾" if lk["sport"] == "tennis" else ("🎮" if lk["sport"] == "cs2" else "⚔️")
-        lines.append(
-            f"{status} {sport_icon} <b>{lk['fav']}</b> ({int(lk['prob']*100)}%) "
-            f"vs {lk['p2'] if lk['fav'] == lk['p1'] else lk['p1']}\n"
-            f"   <i>{lk.get('tournament', '?')[:40]}</i>\n"
-            f"   #ID{lk['id']} · {lk['date']}"
-        )
+    # Сортируем по probability DESC (уже отсортировано в get_locks)
+    lines = [f"🎯 <b>ТОП-ВЫБОРЫ ДНЯ ({int(min_prob*100)}%+)</b>", ""]
 
+    # Компактный список: спорт-эмодзи + Победитель — X% · vs соперник
+    for i, lk in enumerate(locks[:15], 1):
+        sport_icon = ("🎾" if lk["sport"] == "tennis"
+                      else "🎮" if lk["sport"] == "cs2"
+                      else "⚔️")
+        status = ""
+        if lk.get("outcome") == 1:
+            status = " ✅"
+        elif lk.get("outcome") == 0:
+            status = " ❌"
+
+        # Определяем оппонента
+        opponent = lk['p2'] if lk['fav'] == lk['p1'] else lk['p1']
+        # Обрезаем длинные имена
+        fav_name = str(lk['fav'])[:25]
+        opp_name = str(opponent)[:20]
+
+        lines.append(
+            f"{sport_icon} <b>{fav_name}</b> — <b>{int(lk['prob']*100)}%</b>{status}"
+        )
+        lines.append(f"    vs {opp_name}")
+
+    # Итог по точности
+    lines.append("")
     if accuracy["total"] > 0:
         lines.append(
-            f"\n📊 <b>Точность локов</b> за 30 дн: "
-            f"{accuracy['correct']}/{accuracy['total']} = "
-            f"<b>{int(accuracy['hit_rate']*100)}%</b>"
+            f"📊 Точность ({int(min_prob*100)}%+): "
+            f"<b>{accuracy['correct']}/{accuracy['total']} = "
+            f"{int(accuracy['hit_rate']*100)}%</b> за 30 дн"
         )
+    lines.append("")
+    lines.append("<i>⚠️ Исследовательский анализ, не совет по ставкам</i>")
 
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
