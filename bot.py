@@ -963,8 +963,16 @@ async def cmd_locks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             if not schedule:
                 await update.message.reply_text(
-                    "❌ Не удалось получить расписание. "
-                    "Проверь /resolveday или сделай /analyze вручную."
+                    "❌ <b>Автоскан не нашёл матчей</b>\n\n"
+                    "Возможные причины:\n"
+                    "• Sofascore заблокирован (Cloudflare)\n"
+                    "• Нет активного турнира сегодня\n"
+                    "• Все матчи уже завершены\n\n"
+                    "Что делать:\n"
+                    "1. Проверь логи Railway — что вернула Sofascore\n"
+                    "2. Сделай /analyze для нужных матчей вручную\n"
+                    "3. Обнови hardcoded список в _hardcoded_wimbledon_matches()",
+                    parse_mode=ParseMode.HTML
                 )
                 return
 
